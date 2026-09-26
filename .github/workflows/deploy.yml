@@ -59,4 +59,4 @@ jobs:
             --project ${{ secrets.GCP_PROJECT_ID }} \
             --platform managed \
             --allow-unauthenticated \
-            --set-env-vars "DATABASE_URL=${{ secrets.DATABASE_URL }},SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }},GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},CRON_SECRET=${{ secrets.CRON_SECRET }}"
+            --set-env-vars "DATABASE_URL=${{ secrets.DATABASE_URL }},SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }},AI_SERVICE_URL=${{ secrets.AI_SERVICE_URL }},AI_SERVICE_SECRET=${{ secrets.AI_SERVICE_SECRET }},CRON_SECRET=${{ secrets.CRON_SECRET }}"
