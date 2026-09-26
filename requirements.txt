@@ -8,4 +8,4 @@ pydantic-settings
 python-dotenv
 slowapi
 sentry-sdk
-# ai @ git+https://github.com/CampuSpot-SKU/ai.git@main
+httpx
