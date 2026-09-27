@@ -5,7 +5,13 @@ Cloud Run에서는 deploy.yml의 --set-env-vars로, 로컬 도구(alembic 등)�
 """
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# requirements.txt에 설치된 드라이버는 psycopg2뿐이라, 어떤 형태로 URL이 들어와도
+# SQLAlchemy가 psycopg2를 쓰도록 스킴을 통일한다.
+# (예: GitHub Secret이 postgresql+psycopg://로 등록돼 있으면 psycopg3를 찾다가 실패함)
+_PG_SCHEMES = ("postgresql+psycopg2://", "postgresql+psycopg://", "postgresql://", "postgres://")
 
 
 class Settings(BaseSettings):
@@ -28,6 +34,15 @@ class Settings(BaseSettings):
     cron_secret: str = ""
     sentry_dsn: str = ""
     rate_limit_per_minute: int = 20
+
+    @field_validator("database_url")
+    @classmethod
+    def _normalize_pg_scheme(cls, v: str) -> str:
+        v = v.strip()
+        for scheme in _PG_SCHEMES:
+            if v.startswith(scheme):
+                return "postgresql+psycopg2://" + v[len(scheme):]
+        return v
 
 
 @lru_cache
