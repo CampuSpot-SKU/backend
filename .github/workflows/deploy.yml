@@ -51,6 +51,13 @@ jobs:
           docker push $IMAGE:${{ github.sha }}
           docker push $IMAGE:latest
 
+      - name: Run DB migrations (alembic upgrade head)
+        # 이미지 빌드/푸시가 성공한 뒤, 새 리비전 배포 직전에 스키마를 먼저 올림.
+        # 여기서 실패하면 배포 자체가 멈춰서 "코드는 새 버전인데 DB는 옛 스키마" 상태를 막음.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: alembic upgrade head
+
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy $SERVICE \
