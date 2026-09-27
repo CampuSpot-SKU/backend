@@ -4,4 +4,4 @@
 `ai` 서비스(`campuspot-ai` Cloud Run)를 HTTP로 호출해서 사용 —
 `AI_SERVICE_URL` + `X-Internal-Secret` 인증.
 
-기준 명세서: [docs/campus-esm-chatbot-spec.md](docs/campus-esm-chatbot-spec.md)
+기준 명세서는 팀 비공개 문서 레포에서 관리합니다 (팀원 전용).

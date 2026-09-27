@@ -1,0 +1,13 @@
+# 줄바꿈을 LF로 통일 — Windows/Mac 팀원이 섞여도 "내용은 같은데 전 줄이 바뀐 것처럼" 보이는
+# 가짜 변경·충돌을 막음 (Windows에서 뜨던 "LF will be replaced by CRLF" 경고도 사라짐)
+* text=auto eol=lf
+
+# 바이너리 파일은 줄바꿈 변환 대상에서 제외
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
