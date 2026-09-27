@@ -1,11 +1,12 @@
-fastapi
-uvicorn[standard]
-sqlalchemy
-alembic
-psycopg2-binary
-pydantic
-pydantic-settings
-python-dotenv
-slowapi
-sentry-sdk
-httpx
+# 버전 고정 — 새 버전 출시로 배포가 갑자기 깨지는 것 방지. 올릴 때는 의도적으로 숫자를 바꿀 것.
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
+sqlalchemy==2.1.1
+alembic==1.20.0
+psycopg2-binary==2.9.13
+pydantic==2.13.5
+pydantic-settings==2.15.0
+python-dotenv==1.2.3
+slowapi==0.1.10
+sentry-sdk==2.70.0
+httpx==0.28.1

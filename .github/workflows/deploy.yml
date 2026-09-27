@@ -1,35 +1,66 @@
-name: Deploy backend to Cloud Run
+name: CI/CD backend
 
+# push(main) 한 번에 실행 1개: test(시크릿 검사·lint·테스트) 통과 → deploy 순서.
+# test가 실패하면 deploy는 실행되지 않음. PR에서는 test만 돌고 배포는 안 함.
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+
+# 연달아 push해도 배포가 동시에 돌지 않고 순서대로 대기 (옛 버전이 새 버전을 덮어쓰는 것 방지)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   REGION: asia-northeast3
-  REPO: campuspot
   SERVICE: campuspot-backend
   IMAGE: asia-northeast3-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/campuspot/backend
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # gitleaks가 전체 커밋 이력을 검사하도록
+
+      - name: Secret scan (gitleaks)
+        # 커밋 이력 전체에서 API 키/비밀번호 패턴 검사 — 걸리면 배포까지 진행 안 됨
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz | tar xz gitleaks
+          ./gitleaks detect --source . --redact -v
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt ruff==0.16.9
+
+      - name: Lint (ruff)
+        run: ruff check .
+
   deploy:
+    needs: test
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
-      - name: Install deps
+      - name: Install deps (alembic 실행용)
         run: pip install -r requirements.txt
-
-      - name: Lint (ruff)
-        run: |
-          pip install ruff
-          ruff check . || true   # Phase 0 테스트 단계라 lint 실패로 배포까지 막지는 않음 — 나중에 안정화되면 || true 제거
 
       - id: auth
         name: Authenticate to GCP
@@ -43,13 +74,10 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker asia-northeast3-docker.pkg.dev --quiet
 
-      - name: Build image
-        run: docker build -t $IMAGE:${{ github.sha }} -t $IMAGE:latest .
-
-      - name: Push image
+      - name: Build & push image
         run: |
+          docker build -t $IMAGE:${{ github.sha }} .
           docker push $IMAGE:${{ github.sha }}
-          docker push $IMAGE:latest
 
       - name: Run DB migrations (alembic upgrade head)
         # 이미지 빌드/푸시가 성공한 뒤, 새 리비전 배포 직전에 스키마를 먼저 올림.
@@ -59,6 +87,7 @@ jobs:
         run: alembic upgrade head
 
       - name: Deploy to Cloud Run
+        # --max-instances: 과금 폭주 + Supabase 커넥션 고갈 방지 (인스턴스당 DB 커넥션 최대 5)
         run: |
           gcloud run deploy $SERVICE \
             --image $IMAGE:${{ github.sha }} \
@@ -66,4 +95,5 @@ jobs:
             --project ${{ secrets.GCP_PROJECT_ID }} \
             --platform managed \
             --allow-unauthenticated \
+            --max-instances 2 \
             --set-env-vars "DATABASE_URL=${{ secrets.DATABASE_URL }},SUPABASE_URL=${{ secrets.SUPABASE_URL }},SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }},AI_SERVICE_URL=${{ secrets.AI_SERVICE_URL }},AI_SERVICE_SECRET=${{ secrets.AI_SERVICE_SECRET }},CRON_SECRET=${{ secrets.CRON_SECRET }}"
