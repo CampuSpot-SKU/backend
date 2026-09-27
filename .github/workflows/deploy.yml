@@ -1,7 +1,11 @@
 name: CI/CD backend
 
-# push(main) 한 번에 실행 1개: test(시크릿 검사·lint·테스트) 통과 → deploy 순서.
-# test가 실패하면 deploy는 실행되지 않음. PR에서는 test만 돌고 배포는 안 함.
+# push(main) 한 번에 실행 1개, 작업 3개:
+#   test  ─┐
+#          ├─> deploy   (test와 build가 둘 다 성공해야 배포)
+#   build ─┘
+# test와 build는 서로 기다리지 않고 동시에 실행 → 단계를 나눠도 전체 시간은 늘지 않음.
+# test가 실패하면 이미지는 만들어져도 배포되지 않음. PR에서는 test만 실행.
 on:
   push:
     branches: [main]
@@ -18,13 +22,15 @@ env:
   SERVICE: campuspot-backend
   IMAGE: asia-northeast3-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/campuspot/backend
 
+# runs-on은 ubuntu-24.04로 고정 — ubuntu-latest는 10/19~11/19 사이 Ubuntu 26으로 바뀌어서
+# 마감 직전에 실행 환경이 모르게 바뀌는 것 방지
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0   # gitleaks가 전체 커밋 이력을 검사하도록
 
@@ -34,7 +40,7 @@ jobs:
           curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz | tar xz gitleaks
           ./gitleaks detect --source . --redact -v
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -45,16 +51,41 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
-  deploy:
-    needs: test
+  build:
     if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - id: auth
+        name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker asia-northeast3-docker.pkg.dev --quiet
+
+      - name: Build & push image (태그 = 커밋 SHA)
+        run: |
+          docker build -t $IMAGE:${{ github.sha }} .
+          docker push $IMAGE:${{ github.sha }}
+
+  deploy:
+    needs: [test, build]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -64,23 +95,15 @@ jobs:
 
       - id: auth
         name: Authenticate to GCP
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@v3
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker asia-northeast3-docker.pkg.dev --quiet
-
-      - name: Build & push image
-        run: |
-          docker build -t $IMAGE:${{ github.sha }} .
-          docker push $IMAGE:${{ github.sha }}
+        uses: google-github-actions/setup-gcloud@v3
 
       - name: Run DB migrations (alembic upgrade head)
-        # 이미지 빌드/푸시가 성공한 뒤, 새 리비전 배포 직전에 스키마를 먼저 올림.
+        # 새 리비전 배포 직전에 스키마를 먼저 올림.
         # 여기서 실패하면 배포 자체가 멈춰서 "코드는 새 버전인데 DB는 옛 스키마" 상태를 막음.
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
