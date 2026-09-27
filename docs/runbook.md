@@ -8,9 +8,9 @@
 
 | 무엇 | 주소 |
 |---|---|
-| ai 서비스 | https://campuspot-ai-890230516680.asia-northeast3.run.app (`/healthz`, `/docs`) |
-| backend 서비스 | GCP Console → Cloud Run → `campuspot-backend` 에서 URL 확인 (`/healthz`, `/docs`) |
-| frontend | GCP Console → Cloud Run → `campuspot-frontend` |
+| backend 서비스 | https://campuspot-backend-890230516680.asia-northeast3.run.app (`/health`, `/docs`) |
+| ai 서비스 | https://campuspot-ai-890230516680.asia-northeast3.run.app (`/health`, `/docs`) |
+| frontend | https://campuspot-frontend-890230516680.asia-northeast3.run.app |
 | GitHub Actions | 각 레포(`CampuSpot-SKU/backend`·`ai`·`frontend`) → Actions 탭 |
 | DB | Supabase 대시보드 → Table Editor / Logs |
 | Gemini 사용량·결제 | https://ai.studio/projects |
@@ -31,8 +31,8 @@
 > test가 빨간색이면 deploy는 실행되지 않으므로 배포된 사이트는 **이전 버전 그대로**다.
 
 ### B. Actions는 초록인데 사이트가 이상함
-1. **`/healthz` 확인** — backend는 `{"status":"ok","db":"ok"}`가 정상. `"db":"error"`면 DB 연결 문제(→ Supabase 상태 확인)
-2. **ai 서비스 `/healthz`도 확인** — backend 문제로 보이는 것 중 상당수가 실제로는 ai 서비스 쪽 문제
+1. **`/health` 확인** — backend는 `{"status":"ok","db":"ok"}`가 정상. `"db":"error"`면 DB 연결 문제(→ Supabase 상태 확인)
+2. **ai 서비스 `/health`도 확인** — backend 문제로 보이는 것 중 상당수가 실제로는 ai 서비스 쪽 문제
 3. **에러 응답 코드로 구분**
 
 | 코드 | 흔한 원인 |
@@ -60,6 +60,7 @@
 |---|---|---|---|
 | 2026-09-28 | 배포 중 `Run DB migrations`에서 `No module named 'psycopg'` | `DATABASE_URL` 시크릿이 `postgresql+psycopg://`(psycopg3) 형식인데 설치된 드라이버는 psycopg2 | backend `config.py`·ai `db.py`에서 URL 형식을 psycopg2로 자동 통일 |
 | 2026-09-28 | ai `/api/v1/intent/classify`가 503 | Gemini API 선불 크레딧 소진 (`402 RESOURCE_EXHAUSTED`) | AI Studio에서 크레딧 충전 (팀 결정 대기) |
+| 2026-09-28 | 배포된 서비스의 `/healthz`가 404 | Cloud Run이 z로 끝나는 경로(`/healthz` 등)를 예약해서 앱까지 요청이 안 감 | 헬스체크 경로를 `/health`로 변경 |
 | 2026-09-28 | Actions에 Node.js 20 deprecated 경고 | GitHub 공식 액션 구버전 | 액션 버전 업(checkout@v5 등), 러너 `ubuntu-24.04` 고정 |
 
 ## 아직 없는 것 (구현되면 이 문서에 반영)

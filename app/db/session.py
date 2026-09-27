@@ -44,7 +44,7 @@ def get_db() -> Iterator[Session]:
 
 
 def check_db() -> bool:
-    """/healthz용 — DB에 SELECT 1이 되는지만 확인."""
+    """/health용 — DB에 SELECT 1이 되는지만 확인."""
     try:
         with get_engine().connect() as conn:
             conn.execute(text("SELECT 1"))
