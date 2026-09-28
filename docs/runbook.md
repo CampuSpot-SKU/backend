@@ -14,6 +14,7 @@
 | GitHub Actions | 각 레포(`CampuSpot-SKU/backend`·`ai`·`frontend`) → Actions 탭 |
 | DB | Supabase 대시보드 → Table Editor / Logs |
 | Gemini 사용량·결제 | https://ai.studio/projects |
+| DB 생존 확인(매일 자동) | backend 레포 Actions → **Keepalive** — 빨간색이면 DB 연결 이상 또는 Supabase 일시정지 |
 
 ## 1. 어디서 문제가 났는지 먼저 구분
 
@@ -51,6 +52,7 @@
 |---|---|
 | 방금 배포한 코드 | **Cloud Run 직전 리비전으로 롤백**: GCP Console → Cloud Run → 서비스 → **리비전** 탭 → 직전 리비전 선택 → **트래픽 관리**에서 100% 지정. 몇 초 안에 복구됨. 그다음 코드를 고쳐서 다시 push |
 | DB 마이그레이션 | 로컬에서 downgrade를 돌리지 않는 구조라 **되돌리는 새 마이그레이션을 추가해서 push**(forward-fix)가 기본. 데이터가 걸린 변경이면 마이그레이션 전에 Supabase 백업부터 |
+| Supabase 일시정지 | Supabase 대시보드 → 프로젝트 → **Resume project** (데이터 보존됨). Keepalive가 돌고 있으면 발생하지 않아야 함 |
 | Gemini 크레딧·쿼터 | AI Studio에서 결제·한도 확인. 코드로 해결 안 됨 |
 | 특정 기능만 문제 | 기능 킬스위치 환경변수(`ENABLE_DETECTION` 등)로 끄기 — **(아직 미구현, 기능 구현 시 추가 예정)** |
 

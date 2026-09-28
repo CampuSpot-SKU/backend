@@ -1,0 +1,22 @@
+name: Keepalive (Supabase 일시정지 방지)
+
+# Supabase 무료 플랜은 7일간 활동이 적으면 프로젝트를 자동 일시정지한다.
+# 매일 한 번 backend /health를 호출 — /health가 DB에 SELECT 1을 실행하므로 DB 활동으로 잡힘.
+# 부수효과: DB 연결이 끊겨 있으면 이 워크플로우가 실패(빨간색)해서 이상을 빨리 알 수 있음.
+# Actions 탭에서 "Run workflow"로 수동 실행도 가능.
+on:
+  schedule:
+    - cron: "17 0 * * *"   # 매일 09:17 KST (UTC 00:17)
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Call backend /health
+        run: |
+          body=$(curl -sS --retry 3 --retry-delay 10 --max-time 60 \
+            https://campuspot-backend-890230516680.asia-northeast3.run.app/health)
+          echo "$body"
+          echo "$body" | grep -q '"db":"ok"'
