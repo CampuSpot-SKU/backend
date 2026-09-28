@@ -16,16 +16,16 @@ pytestmark = pytest.mark.skipif(not TEST_DB, reason="TEST_DATABASE_URL 없음 �
 if TEST_DB:
     os.environ["DATABASE_URL"] = TEST_DB
 
-from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import select  # noqa: E402
+from fastapi.testclient import TestClient
+from sqlalchemy import select
 
-from app.config import get_settings  # noqa: E402
-from app.db.session import get_engine, get_sessionmaker  # noqa: E402
-from app.main import app  # noqa: E402
-from app.models import Report, ReportStatusHistory  # noqa: E402
-from app.models.enums import ReportStatus  # noqa: E402
-from app.routers.chat import get_intent_classifier  # noqa: E402
-from app.services.ai_client import AiServiceError, HistoryItem, IntentResult  # noqa: E402
+from app.config import get_settings
+from app.db.session import get_engine, get_sessionmaker
+from app.main import app
+from app.models import Report, ReportStatusHistory
+from app.models.enums import ReportStatus
+from app.routers.chat import get_intent_classifier
+from app.services.ai_client import AiServiceError, HistoryItem, IntentResult
 
 # 문장 → 가짜 의도분류 결과 (명세서 4-4 few-shot과 같은 판정)
 FAKE: dict[str, IntentResult] = {

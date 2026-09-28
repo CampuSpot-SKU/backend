@@ -16,6 +16,7 @@ import secrets
 import uuid
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -66,8 +67,13 @@ def get_intent_classifier() -> IntentClassifier:
     return classify_intent
 
 
+# 의존성은 Annotated로 선언 (FastAPI 권장 방식, ruff B008 대응)
+DbSession = Annotated[Session, Depends(get_db)]
+Classifier = Annotated[IntentClassifier, Depends(get_intent_classifier)]
+
+
 @router.post("/sessions", response_model=SessionCreated, status_code=201)
-def create_session(db: Session = Depends(get_db)) -> SessionCreated:
+def create_session(db: DbSession) -> SessionCreated:
     """대화 세션 시작 — 프론트는 받은 session_id를 localStorage에 저장해 이후 요청에 사용."""
     # user_identifier: 익명 식별값 (NOT NULL 컬럼). 본인 확인은 session_id로 하므로 랜덤값이면 충분
     session = ChatSession(user_identifier=secrets.token_urlsafe(16))
@@ -96,8 +102,8 @@ def send_message(
     request: Request,  # slowapi가 요구 (레이트 리밋 키 계산용)
     session_id: uuid.UUID,
     body: MessageIn,
-    db: Session = Depends(get_db),
-    classify: IntentClassifier = Depends(get_intent_classifier),
+    db: DbSession,
+    classify: Classifier,
 ) -> ChatReply | StreamingResponse:
     if db.get(ChatSession, session_id) is None:
         raise HTTPException(status_code=404, detail="대화 세션을 찾을 수 없어요.")
