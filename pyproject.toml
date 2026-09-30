@@ -3,3 +3,7 @@ line-length = 100
 
 [tool.mypy]
 python_version = "3.11"
+
+# CI에서 `pytest tests/`로 실행할 때 `from app...` import가 되도록 backend 루트를 경로에 추가
+[tool.pytest.ini_options]
+pythonpath = ["."]

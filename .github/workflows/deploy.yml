@@ -46,10 +46,18 @@ jobs:
           cache: pip
 
       - name: Install deps
-        run: pip install -r requirements.txt ruff==0.16.9
+        # 검사 도구 버전은 ai 레포와 동일하게 고정 (올릴 때는 두 레포 같이)
+        run: pip install -r requirements.txt ruff==0.16.9 mypy==2.3.1 pytest==9.1.1
 
       - name: Lint (ruff)
         run: ruff check .
+
+      - name: Type check (mypy)
+        run: mypy app
+
+      - name: Unit tests (pytest)
+        # DB가 필요한 테스트는 TEST_DATABASE_URL이 없으면 skip (운영 DB로는 절대 돌리지 않음)
+        run: pytest tests/ -v
 
   build:
     if: github.event_name == 'push'
