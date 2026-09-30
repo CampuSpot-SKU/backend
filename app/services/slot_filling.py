@@ -303,6 +303,14 @@ def _match_building(
         word = m.group(1)
         if word not in DETAIL_PLACES and word not in known_places:  # "현관"·"체육관"은 건물 이름이 아님
             return None, None, False, word
+    # 4) 야외 장소처럼 생겼지만 학교 데이터에 없는 이름("하늘공원") → 있는 곳처럼 받지 않고 되물음
+    #    (접미어 목록은 campus.json — 다른 학교에 적용할 땐 그 파일만 교체)
+    suffixes = campus_rules().get("unknown_place_suffixes", [])
+    if suffixes:
+        pattern = re.compile(r"([가-힣A-Za-z0-9]{1,8}(?:" + "|".join(map(re.escape, suffixes)) + r"))" + _END)
+        for m in pattern.finditer(text):
+            if m.group(1) not in known_places and cp.find_unique(m.group(1)) is None:
+                return None, None, False, m.group(1)
     return None, None, False, None
 
 

@@ -572,3 +572,14 @@ def test_vague_complaint_is_not_a_known_problem() -> None:
     q = next_question(slots, set())
     assert q is not None and q.key == "problem"
     assert extract_slots("북악관 3층 복도 불이 안 켜져요").has_problem
+
+
+def test_unlisted_outdoor_place_is_asked_not_accepted() -> None:
+    # "하늘공원"처럼 학교 데이터에 없는 야외 장소 이름은 있는 곳처럼 받지 않고 건물을 되물음
+    for text in ["서경대 하늘공원에 불이 난 거 같아", "하늘공원 벤치가 부서졌어요"]:
+        slots = extract_slots(text)
+        assert slots.unknown_place == "하늘공원"
+        assert not slots.has_location
+    # 건물이 함께 있거나 학교에 있는 장소(정문)면 그대로 접수
+    assert extract_slots("북악관 앞 정원 벤치가 부서졌어요").has_location
+    assert extract_slots("정문 앞 광장 조명이 나갔어요").has_location
