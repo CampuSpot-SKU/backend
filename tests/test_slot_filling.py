@@ -46,12 +46,13 @@ REPORT, UNCLEAR = ChatIntent.REPORT, ChatIntent.UNCLEAR
 @pytest.mark.parametrize(
     ("text", "category", "location"),
     [
-        ("3동 2층 화장실 물이 계속 새요", "시설·설비", "3동 2층 화장실"),
+        ("혜인관 2층 화장실 물이 계속 새요", "시설·설비", "혜인관 2층 화장실"),
+        ("3동 2층 화장실 물이 계속 새요", "시설·설비", "3동 2층 화장실"),  # 없는 건물도 글자는 남김(되묻기)
         ("복도 조명이 깜빡거려요", "전기", "복도"),
         ("정문 근처 벤치가 부서져 있어요", "시설·설비", "정문"),
-        ("공학관 301호 프로젝터가 안 켜져요", "IT·네트워크", "공학관 301호"),
-        ("도서관 열람실 와이파이가 안 터져요", "IT·네트워크", "도서관 열람실"),
-        ("학생회관 지하1층 화장실 냄새가 너무 심해요", "청소·위생", "학생회관 지하 1층 화장실"),
+        ("혜인관 301호 프로젝터가 안 켜져요", "IT·네트워크", "혜인관 301호"),
+        ("혜인관 열람실 와이파이가 안 터져요", "IT·네트워크", "혜인관 열람실"),
+        ("청운관 지하1층 화장실 냄새가 너무 심해요", "청소·위생", "청운관 지하 1층 화장실"),
         ("계단이 미끄러워요", "안전", "계단"),
     ],
 )
@@ -71,10 +72,30 @@ def test_building_table_match_wins_over_pattern() -> None:
     assert slots.floor == "2"
 
 
-def test_unmatched_building_keeps_text_without_id() -> None:
-    slots = extract_slots("7동 엘리베이터 고장났어요", [])
-    assert slots.building_id is None
-    assert slots.building == "7동"
+def test_unknown_building_name_is_not_a_building() -> None:
+    # 학교에 없는 건물 이름("7동", "공학관")은 건물로 받지 않고 되물음
+    for text, name in [("7동 엘리베이터 고장났어요", "7동"), ("공학관 301호 프로젝터가 안 켜져요", "공학관"),
+                       ("도서관 열람실 와이파이가 안 터져요", "도서관")]:
+        slots = extract_slots(text, [])
+        assert slots.building is None and slots.building_id is None
+        assert slots.unknown_place == name
+        assert not slots.has_location  # 호수·열람실이 있어도 어느 건물인지 모름
+        q = next_question(slots, set())
+        assert q is not None and f"'{name}'은(는) 학교 건물 목록에 없어요" in q.text
+    # 되묻기는 1번 — 한 번 물은 뒤엔 그대로 요약으로
+    assert next_question(extract_slots("7동 엘리베이터 고장났어요"), {ASK_LOC}) is None
+
+
+def test_official_buildings_are_recognized_even_without_table() -> None:
+    slots = extract_slots("혜인관 7층 화장실 물이 새요", [])
+    assert slots.building == "혜인관" and slots.building_id is None and slots.has_location
+    assert extract_slots("체육관 샤워실 물이 안 나와요").building == "수인관"  # 시설 이름 → 건물
+    assert extract_slots("정문 근처 벤치가 부서졌어요").has_location  # 건물 밖 장소
+
+
+def test_unknown_words_ending_in_gwan_are_not_buildings_but_places_are() -> None:
+    assert extract_slots("체육관 조명이 나갔어요").unknown_place is None
+    assert extract_slots("현관 문이 안 닫혀요").unknown_place is None
 
 
 def test_detail_place_is_not_building() -> None:
@@ -106,7 +127,7 @@ def test_impact_and_urgency(text: str, safety: bool, impact: Level, urgency: Lev
 def test_missing_slots() -> None:
     no_location = extract_slots("물이 계속 새요")
     assert not no_location.has_location and no_location.has_problem
-    no_problem = extract_slots("3동 2층 화장실이요")
+    no_problem = extract_slots("혜인관 2층 화장실이요")
     assert no_problem.has_location and not no_problem.has_problem
 
 
@@ -194,8 +215,8 @@ def test_basement_floor() -> None:
 def test_apply_form_overrides_location_and_recomputes_impact() -> None:
     bid = uuid.uuid4()
     buildings = [BuildingRef(bid, "혜인관")]
-    slots = extract_slots("3동 2층 화장실 물이 새요", buildings)
-    out = apply_form(slots, "혜인관", "7", "701호", buildings, "3동 2층 화장실 물이 새요")
+    slots = extract_slots("청운관 2층 화장실 물이 새요", buildings)
+    out = apply_form(slots, "혜인관", "7", "701호", buildings, "청운관 2층 화장실 물이 새요")
     assert out.building_id == bid and out.building == "혜인관"
     assert out.floor == "7" and out.detail == "701호" and out.detail_specific
     # 폼의 빈 값 = 학생이 비움
@@ -203,7 +224,7 @@ def test_apply_form_overrides_location_and_recomputes_impact() -> None:
     assert blank.building is None and blank.floor is None and blank.detail is None
     assert blank.impact == Level.LOW  # 위치가 없으면 영향도 "저"
     # None이면 그대로
-    assert apply_form(slots, None, None, None, buildings, "x").building == "3동"
+    assert apply_form(slots, None, None, None, buildings, "x").building == "청운관"
     # 층 표기 정리
     assert apply_form(slots, None, "지하1층", None, buildings, "x").floor == "B1"
     assert apply_form(slots, None, "B2", None, buildings, "x").floor == "B2"
@@ -220,7 +241,7 @@ def test_next_question_order_and_asks_only_once() -> None:
     q2 = next_question(empty, {ASK_LOC})
     assert q2 is not None and q2.text == ASK_PROBLEM and q2.key == ASK_PROB
     assert next_question(empty, {ASK_LOC, ASK_PROB}) is None  # 더 안 묻고 요약으로
-    assert next_question(extract_slots("3동 화장실 물이 새요"), set()) is None
+    assert next_question(extract_slots("혜인관 화장실 물이 새요"), set()) is None
 
 
 def test_location_question_kinds_share_one_ask() -> None:
@@ -338,3 +359,31 @@ def test_judge_reason() -> None:
     assert "여러 사람이 쓰는 공간" in p1 and "안전 위험 신호" in p1 and "P1" in p1
     p4 = judge_reason(extract_slots("연구실 의자가 부서졌어요"), "P4")
     assert "개인 공간" in p4 and "급한 위험 신호는 없어" in p4 and "P4" in p4
+
+
+def test_draft_description_excludes_location_answers_and_questions() -> None:
+    history = [
+        Msg(U, "강의실 와이파이가 안 터져요", REPORT),
+        Msg(A, START_GREETING + "어느 건물 몇 층 강의실인가요? (예: 은주1관 3층 강의실)" + CANCEL_HINT, REPORT),
+        Msg(U, "3동이 우리학교에 있어?", REPORT),
+        Msg(A, "어느 건물 몇 층 강의실인가요?", REPORT),
+        Msg(U, "혜인관 3층이요", REPORT),
+    ]
+    # 위 구간은 마지막이 사용자 메시지라 진행 중은 아니지만 재구성 규칙은 같음
+    draft = collect_draft(history)
+    assert draft.user_texts == ["강의실 와이파이가 안 터져요", "혜인관 3층이요"]  # 질문은 버림
+    assert draft.desc_texts == ["강의실 와이파이가 안 터져요"]  # 위치 답변은 상황에서 뺌
+
+
+def test_draft_with_reply_follows_last_question_kind() -> None:
+    history = [
+        Msg(U, "물이 새요", REPORT),
+        Msg(A, ASK_LOCATION + CANCEL_HINT, REPORT),
+    ]
+    draft = collect_draft(history)
+    assert draft.last_kind == "location"
+    assert draft.with_reply("3동 2층 화장실이요") == (["물이 새요", "3동 2층 화장실이요"], ["물이 새요"])
+    assert draft.with_reply("여기 어디예요?") == (["물이 새요"], ["물이 새요"])
+    # 상황을 되물은 뒤의 답은 상황으로 씀
+    history = [Msg(U, "3동 2층 화장실이요", REPORT), Msg(A, ASK_PROBLEM + CANCEL_HINT, REPORT)]
+    assert collect_draft(history).with_reply("물이 새요")[1] == ["3동 2층 화장실이요", "물이 새요"]

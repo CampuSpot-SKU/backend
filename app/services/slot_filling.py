@@ -32,9 +32,14 @@ from app.models.enums import ChatIntent, ChatRole, Level
 
 # ── 챗봇 문구 ────────────────────────────────────────────────────────────────
 CANCEL_HINT = "\n(신고를 그만두려면 '취소'라고 입력해 주세요)"
-ASK_LOCATION = "어디에서 생긴 문제인가요? 건물·층·장소를 알려주세요. (예: 3동 2층 화장실)"
+ASK_LOCATION = "어디에서 생긴 문제인가요? 건물·층·장소를 알려주세요. (예: 혜인관 2층 화장실)"
 # 강의실·복도처럼 어디에나 있는 장소 이름만 말했을 때 (건물이 빠짐)
 ASK_LOCATION_GENERIC = "어느 건물 몇 층 {detail}인가요? (예: 은주1관 3층 {detail})"
+# 학교에 없는 건물 이름을 말했을 때 — 없는 건물을 건물로 받지 않고 공식 목록을 보여주며 되물음
+ASK_UNKNOWN_BUILDING = (
+    "'{name}'은(는) 학교 건물 목록에 없어요. 어느 건물인가요? "
+    "(대일관·문예관·본관·북악관·상승관·유담관·은주1관·은주2관·청운관·한림관·혜인관·수인관)"
+)
 EUNJU_CHOICES = ["은주1관", "은주2관", "잘 모르겠어요"]
 ASK_EUNJU = "은주1관인가요, 은주2관인가요? 잘 모르시면 '잘 모르겠어요'라고 해주세요."
 ASK_FLOOR4 = "{building}에는 4층 표기가 없어요. 직접 세어 보신 층이 맞나요? 아니라면 실제 층을 알려주세요."
@@ -56,6 +61,7 @@ LOCATION_MARKERS = (
     "어느 건물 몇 층",
     "은주1관인가요, 은주2관인가요?",
     "에는 4층 표기가 없어요",
+    "학교 건물 목록에 없어요",
 )
 ASK_LOC, ASK_PROB = "location", "problem"  # asked 집합에 들어가는 키
 
@@ -95,7 +101,7 @@ DETAIL_PLACES = ("화장실", "강의실", "복도", "계단", "엘리베이터"
                  "흡연구역", "출입구", "입구", "주차장", "옥상", "식당", "매점", "카페", "라운지",
                  "사물함", "베란다", "현관")
 # 건물명 목록(buildings)이 비어 있어도 알아볼 수 있는 교내 장소
-LANDMARKS = ("정문", "후문", "기숙사", "도서관", "운동장", "학생회관", "본관", "체육관", "대강당")
+UNKNOWN_LANDMARKS = ("기숙사", "도서관", "운동장", "학생회관", "대강당")  # 학교 건물 목록에 없는 곳
 
 # 한글 뒤에 조사가 붙어도 단어 끝으로 인정 ("공학관에서", "3동 2층")
 _END = r"(?=$|[\s,.!?~]|에|의|은|는|이|가|을|를|도|쪽|앞|뒤|옆|안|내|로|서|까지)"
@@ -146,16 +152,21 @@ class ReportSlots:
     # 위치 되묻기 사유 — 은주관인데 1관/2관을 모름 / 4층 없는 건물에서 4층이라고 함
     ambiguous_building: str | None = None
     floor_check: bool = False
+    # 학교 건물 목록에 없는 이름("3동", "공학관")을 말한 경우 — 건물로 받지 않고 되물음 (building은 비움)
+    unknown_place: str | None = None
 
     @property
     def has_location(self) -> bool:
-        """건물이 있거나 호수·특정 시설이 있어야 위치가 채워진 것 (층만, 일반 장소 이름만은 아님)."""
-        return bool(self.building) or self.detail_specific
+        """건물이 있거나 호수·특정 시설이 있어야 위치가 채워진 것 (층만, 일반 장소 이름만은 아님).
+
+        없는 건물 이름을 말했으면 호수가 있어도 어느 건물인지 모르므로 채워진 것으로 보지 않음.
+        """
+        return bool(self.building) or (self.detail_specific and not self.unknown_place)
 
     @property
     def location_text(self) -> str | None:
         """사람이 읽을 위치 문자열 (예: "3동 2층 화장실")."""
-        parts = [self.building]
+        parts = [self.building or self.unknown_place]  # 없는 건물 이름도 관리자가 볼 수 있게 글자로는 남김
         if self.floor:
             parts.append(f"지하 {self.floor[1:]}층" if self.floor.startswith("B") else f"{self.floor}층")
         parts.append(self.detail)
@@ -196,30 +207,40 @@ def _resolve_eunju(text: str) -> tuple[str | None, bool]:
 
 def _match_building(
     text: str, buildings: Sequence[BuildingRef]
-) -> tuple[uuid.UUID | None, str | None, bool]:
-    """(building_id, 건물 이름/표현, 은주관 미확정 여부)."""
+) -> tuple[uuid.UUID | None, str | None, bool, str | None]:
+    """(building_id, 건물 이름, 은주관 미확정 여부, 목록에 없는 건물 이름).
+
+    건물로 인정하는 건 공식 목록(buildings 테이블, 없으면 campus.json의 12개)뿐이다. "3동"처럼
+    목록에 없는 이름은 건물로 받지 않고 네 번째 값(unknown)으로만 돌려줘서 되묻게 한다.
+    """
     eunju, unsure = _resolve_eunju(text)
     if eunju:
         bid, name = _building_ref(eunju, buildings)
-        return bid, name, False
+        return bid, name, False, None
     if unsure:  # 건물은 비우고 사람이 읽을 표현만 남김 (관리자가 location_raw로 확인)
-        return None, "은주관" + EUNJU_UNSURE_SUFFIX, True
-    # 1) buildings 테이블 이름·별칭 (긴 이름부터 — "공학관"보다 "제2공학관" 우선)
+        return None, "은주관" + EUNJU_UNSURE_SUFFIX, True, None
+    # 1) buildings 테이블 이름·별칭 (긴 이름부터 — 별칭이 이름보다 길 수 있음)
     candidates = [(alias, b) for b in buildings for alias in (b.name, *b.aliases) if alias]
     for alias, b in sorted(candidates, key=lambda c: len(c[0]), reverse=True):
         if alias in text:
-            return b.id, b.name, False
-    # 2) 목록에 없어도 건물처럼 보이는 표현 → location_raw로 저장됨
+            return b.id, b.name, False, None
+    # 2) 테이블이 비어 있어도 공식 12개 이름은 알아봄 (id 없음 → location_raw)
+    for name in sorted(campus_rules()["buildings"], key=len, reverse=True):
+        if name in text:
+            return None, name, False, None
+    # 3) 건물 이름처럼 생겼지만 목록에 없는 표현 → 건물로 받지 않음
+    known_places = set(campus_rules()["facilities"]) | set(campus_rules()["outdoor_places"])
     m = _BUILDING_NUM_RE.search(text)
     if m:
-        return None, f"{m.group(1)}동", False
-    landmark = _find_first(text, LANDMARKS)
+        return None, None, False, f"{m.group(1)}동"
+    landmark = _find_first(text, UNKNOWN_LANDMARKS)
     if landmark:
-        return None, landmark, False
+        return None, None, False, landmark
     for m in _BUILDING_SUFFIX_RE.finditer(text):
-        if m.group(1) not in DETAIL_PLACES:  # "현관"은 건물이 아니라 세부 장소
-            return None, m.group(1), False
-    return None, None, False
+        word = m.group(1)
+        if word not in DETAIL_PLACES and word not in known_places:  # "현관"·"체육관"은 건물 이름이 아님
+            return None, None, False, word
+    return None, None, False, None
 
 
 def _match_facility(text: str) -> tuple[str, str, str | None] | None:
@@ -264,7 +285,7 @@ def extract_slots(
     safety_concern: ai 의도분류가 "안전 위험"이라고 판단했는지 (긴급도 상향 힌트, 명세서 4-4).
     """
     lowered = text.lower()
-    building_id, building, eunju_unsure = _match_building(text, buildings)
+    building_id, building, eunju_unsure, unknown_place = _match_building(text, buildings)
     facility = _match_facility(text)
     floor = _match_floor(text)
     if facility:
@@ -274,6 +295,7 @@ def extract_slots(
         floor = floor or ffloor
 
     room = _ROOM_RE.search(text)
+    outdoor = _find_first(text, campus_rules()["outdoor_places"])  # 정문·서문 등 건물 밖 장소
     generic = _find_first(text, DETAIL_PLACES)
     gender = _GENDER_TOILET_RE.search(text)
     if generic == "화장실" and gender:  # 남/여는 학생이 말했을 때만 기록 (추측 금지)
@@ -282,6 +304,8 @@ def extract_slots(
         detail: str | None = fname if not generic or generic in fname else f"{fname} {generic}"
     elif room:
         detail = f"{room.group(1)}호" + (f" {generic}" if generic else "")
+    elif outdoor and not building:
+        detail = outdoor
     else:
         detail = generic
     category = _match_category(lowered)
@@ -292,12 +316,13 @@ def extract_slots(
         building=building,
         floor=floor,
         detail=detail,
-        detail_specific=bool(facility or room),
+        detail_specific=bool(facility or room or (outdoor and not building)),
         category=category,
         has_problem=category is not None or any(w in lowered for w in PROBLEM_WORDS),
-        impact=_impact(text, building, detail),
+        impact=_impact(text, building or unknown_place, detail),
         urgency=Level.HIGH if urgent else Level.LOW,
         ambiguous_building=building if eunju_unsure else None,
+        unknown_place=None if building else unknown_place,
         # 4층 표기가 없는 건물(campus.json)에서 4층이라고 하면 확인
         floor_check=bool(
             building and building in campus_rules()["no_4th_floor"] and floor == "4"
@@ -317,7 +342,7 @@ def apply_form(
 
     폼에서 학생이 직접 고친 값이 우선이라, 빈 문자열은 "비움"으로 본다.
     """
-    out = replace(slots, ambiguous_building=None, floor_check=False)
+    out = replace(slots, ambiguous_building=None, floor_check=False, unknown_place=None)
     if building is not None:
         name = building.strip()
         out.building_id, out.building = (None, None)
@@ -348,39 +373,82 @@ class MessageLike(Protocol):
 class Draft:
     """지금 진행 중인 신고 대화 (대화 기록에서 재구성)."""
 
-    user_texts: list[str] = field(default_factory=list)  # 신고 내용으로 쓸 사용자 메시지들 (오래된 순)
+    # 슬롯(위치·상황) 추출에 쓸 사용자 메시지들 (오래된 순)
+    user_texts: list[str] = field(default_factory=list)
+    # 접수 "상황(description)"으로 쓸 메시지들 — 위치 되묻기·요약 정정에 대한 짧은 답("혜인관 3층이요")은
+    # 위치 추출에만 쓰고 여기엔 안 넣음 (그 답에 문제 내용이 들어 있으면 넣음)
+    desc_texts: list[str] = field(default_factory=list)
     asked: set[str] = field(default_factory=set)  # 이미 물어본 질문 종류 (ASK_LOC / ASK_PROB)
     safety_concern: bool = False
     in_progress: bool = False  # 직전 챗봇 메시지가 신고 흐름 안의 말(되묻기·요약)이었나
     confirming: bool = False  # 직전 챗봇 메시지가 요약 확인이었나 → 이번 메시지는 접수/수정/취소
+    last_kind: str | None = None  # 직전 챗봇 메시지 종류: "location" / "problem" / "summary"
 
     @property
     def text(self) -> str:
         return "\n".join(self.user_texts)
+
+    def with_reply(self, text: str) -> tuple[list[str], list[str]]:
+        """이번 메시지를 반영한 (추출용, 상황용) 목록. 저장된 대화에 쓰는 규칙과 같음."""
+        extract, desc = list(self.user_texts), list(self.desc_texts)
+        _apply_reply(extract, desc, self.last_kind, text)
+        return extract, desc
+
+
+def is_question_like(text: str) -> bool:
+    """되묻기에 대한 답이 아니라 학생이 다른 걸 묻는 말 ("3동이 우리학교에 있어?")."""
+    return "?" in text or "？" in text
+
+
+def _has_problem_text(text: str) -> bool:
+    return _match_category(text.lower()) is not None or any(w in text for w in PROBLEM_WORDS)
+
+
+def _apply_reply(extract: list[str], desc: list[str], prev_kind: str | None, text: str) -> None:
+    """되묻기·요약 뒤에 온 사용자 메시지 하나를 추출용/상황용 목록에 반영."""
+    if prev_kind in ("location", "problem") and is_question_like(text):
+        return  # 되묻기와 상관없는 질문 — 위치로도 상황으로도 쓰지 않음
+    extract.append(text)
+    if prev_kind == "problem" or prev_kind is None or _has_problem_text(text):
+        desc.append(text)
+
+
+def _message_kind(content: str) -> str | None:
+    if SUMMARY_PREFIX in content:
+        return "summary"
+    if any(m in content for m in LOCATION_MARKERS):
+        return "location"
+    if ASK_PROBLEM in content:
+        return "problem"
+    return None
 
 
 def collect_draft(history: Sequence[MessageLike]) -> Draft:
     """세션 대화 기록(오래된 순)에서 진행 중인 신고를 모은다. 이번에 보낸 메시지는 포함하지 않음."""
     draft = Draft()
     i = len(history) - 1
-    # 끝에서부터 intent=신고인 메시지 구간을 거슬러 올라감
+    # 끝에서부터 intent=신고인 메시지 구간을 거슬러 올라감 (구간의 시작 위치를 찾음)
     while i >= 0 and history[i].intent == ChatIntent.REPORT:
-        msg = history[i]
+        i -= 1
+    prev_kind: str | None = None
+    for msg in history[i + 1:]:
         if msg.role == ChatRole.USER:
-            draft.user_texts.insert(0, msg.content)
+            _apply_reply(draft.user_texts, draft.desc_texts, prev_kind, msg.content)
             if (msg.intent_scores or {}).get("safety_concern"):
                 draft.safety_concern = True
+            prev_kind = None
         else:
-            if any(m in msg.content for m in LOCATION_MARKERS):
+            prev_kind = _message_kind(msg.content)
+            if prev_kind == "location":
                 draft.asked.add(ASK_LOC)
             if ASK_PROBLEM in msg.content:
                 draft.asked.add(ASK_PROB)
-        i -= 1
     last_is_report_reply = bool(history) and (
         history[-1].intent == ChatIntent.REPORT and history[-1].role == ChatRole.ASSISTANT
     )
     draft.in_progress = last_is_report_reply
     draft.confirming = last_is_report_reply and SUMMARY_PREFIX in history[-1].content
+    draft.last_kind = _message_kind(history[-1].content) if last_is_report_reply else None
 
     # "계단이 미끄러운데 어떻게 해요?" → (애매함, 되묻기) → "신고해주세요" 흐름이면
     # 되묻기 직전의 원래 문장도 신고 내용에 포함 (그래야 상황을 다시 묻지 않음)
@@ -392,6 +460,7 @@ def collect_draft(history: Sequence[MessageLike]) -> Draft:
         and history[i - 1].intent == ChatIntent.UNCLEAR
     ):
         draft.user_texts.insert(0, history[i - 1].content)
+        draft.desc_texts.insert(0, history[i - 1].content)
     return draft
 
 
@@ -445,6 +514,8 @@ def next_question(slots: ReportSlots, asked: set[str]) -> Question | None:
     if ASK_LOC not in asked:
         if slots.ambiguous_building:
             return Question(ASK_EUNJU, ASK_LOC, list(EUNJU_CHOICES))
+        if slots.unknown_place and not slots.building:
+            return Question(ASK_UNKNOWN_BUILDING.format(name=slots.unknown_place), ASK_LOC)
         if slots.floor_check and slots.building:
             return Question(ASK_FLOOR4.format(building=slots.building), ASK_LOC)
         if not slots.has_location:
@@ -465,6 +536,8 @@ def _one_line(text: str, limit: int = 80) -> str:
 def build_summary(slots: ReportSlots, texts: Sequence[str], greeting: bool) -> str:
     """요약 확인 메시지 — SUMMARY_PREFIX로 시작해야 대화 재구성에서 인식됨."""
     location = slots.location_text or "확인되지 않았어요 (담당자가 확인할게요)"
+    if slots.unknown_place and not slots.building:
+        location += " — 학교 건물 목록에 없는 이름이에요 (폼에서 고쳐 주세요)"
     situation = _one_line(" ".join(texts)) if slots.has_problem else "확인되지 않았어요"
     head = (START_GREETING if greeting else "") + SUMMARY_PREFIX
     return f"{head}\n· 위치: {location}\n· 상황: {situation}\n{SUMMARY_HINT}"

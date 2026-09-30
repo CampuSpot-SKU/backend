@@ -169,10 +169,13 @@ def send_message(
         if action == "confirm_report" and not draft.in_progress:
             # 화면이 오래돼 서버엔 진행 중인 신고가 없음 → 폼에 적힌 내용으로 새로 시작해 요약부터
             texts = [t for t in [(body.draft.description if body.draft else None)] if t]
-            return _report_step(db, session_id, user_msg, texts, set(), False, start=True)
-        texts = list(draft.user_texts) if confirm else [*draft.user_texts, text]
+            return _report_step(db, session_id, user_msg, texts, texts, set(), False, start=True)
+        if confirm:
+            texts, descs = list(draft.user_texts), list(draft.desc_texts)
+        else:
+            texts, descs = draft.with_reply(text)  # 위치 답변·질문은 상황에서 빼는 규칙 적용
         return _report_step(
-            db, session_id, user_msg, texts, draft.asked, draft.safety_concern,
+            db, session_id, user_msg, texts, descs, draft.asked, draft.safety_concern,
             confirm=confirm, form=body.draft if confirm else None,
         )
 
@@ -210,7 +213,8 @@ def send_message(
 
     # 3) 신고 — 새로 시작 (애매함→신고로 이어진 경우 원래 문장도 draft에 포함돼 있음)
     user_msg.intent = ChatIntent.REPORT
-    return _report_step(db, session_id, user_msg, [*draft.user_texts, text], draft.asked,
+    return _report_step(db, session_id, user_msg, [*draft.user_texts, text],
+                        [*draft.desc_texts, text], draft.asked,
                         draft.safety_concern or result.safety_concern, start=True)
 
 
@@ -254,7 +258,8 @@ def _report_step(
     db: Session,
     session_id: uuid.UUID,
     user_msg: ChatMessage,
-    texts: list[str],
+    texts: list[str],  # 슬롯(위치·상황) 추출에 쓸 메시지들
+    descs: list[str],  # 접수 상황(description)으로 쓸 메시지들
     asked: set[str],
     safety_concern: bool,
     *,
@@ -264,15 +269,16 @@ def _report_step(
 ) -> ReportFollowUp | ReportConfirm | ReportCreated:
     """슬롯을 뽑아서 되묻거나(빠진 게 있음), 요약을 보여주거나(다 모임), [접수] 확인이면 접수 생성."""
     joined = "\n".join(texts)
+    described = "\n".join(descs)
     buildings = load_buildings(db)
     form_desc = (form.description or "").strip() if form else ""
     # 폼에서 상황 설명을 고쳤으면 그 내용도 판정에 반영
-    judged = f"{joined}\n{form_desc}" if form_desc and form_desc != joined else joined
+    judged = f"{joined}\n{form_desc}" if form_desc and form_desc != described else joined
     slots = extract_slots(judged, buildings, safety_concern)
     if confirm:
         if form is not None:
             slots = apply_form(slots, form.building, form.floor, form.detail, buildings, judged)
-        return _create(db, session_id, user_msg, slots, form_desc or joined)
+        return _create(db, session_id, user_msg, slots, form_desc or described or joined)
 
     question = next_question(slots, asked)
     greeting = START_GREETING if start else ""
@@ -283,17 +289,17 @@ def _report_step(
         db.commit()
         return ReportFollowUp(
             follow_up_question=content,
-            slots_filled=_slots_filled(slots, joined),
+            slots_filled=_slots_filled(slots, described),
             choices=question.choices,
         )
 
     # 필수 항목이 찼거나 같은 질문을 이미 했음 → 바로 접수하지 않고 요약 확인
-    summary = build_summary(slots, texts, greeting=start)
+    summary = build_summary(slots, descs, greeting=start)
     reply = _add_message(db, session_id, ChatRole.ASSISTANT, summary, _after(user_msg))
     reply.intent = ChatIntent.REPORT
     db.commit()
     return ReportConfirm(
-        summary=summary, follow_up_question=summary, slots_filled=_slots_filled(slots, joined)
+        summary=summary, follow_up_question=summary, slots_filled=_slots_filled(slots, described)
     )
 
 
