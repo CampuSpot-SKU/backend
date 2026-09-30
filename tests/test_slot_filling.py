@@ -604,3 +604,9 @@ def test_outdoor_spot_near_building_needs_no_floor() -> None:
     # 층·호수·일반 장소를 말하면 기존처럼 층/장소를 따짐
     assert not extract_slots("북악관 벤치가 부서졌어요").detail_specific
     assert extract_slots("북악관 3층 복도 불이 나갔어요").location_text == "북악관 3층 복도"
+
+
+def test_light_out_expression_counts_as_problem() -> None:
+    # "불이 나갔어요"는 조명 문제 — 상황을 아는 문장이라 "어떤 문제인가요?"를 되묻지 않음
+    slots = extract_slots("북악관 3층 복도 불이 나갔어요")
+    assert slots.has_problem and slots.category == "전기"
