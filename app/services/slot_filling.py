@@ -42,7 +42,18 @@ ASK_UNKNOWN_BUILDING = (
 EUNJU_CHOICES = ["은주1관", "은주2관", "잘 모르겠어요"]
 ASK_EUNJU = "은주1관인가요, 은주2관인가요? 잘 모르시면 '잘 모르겠어요'라고 해주세요."
 ASK_BUILDING_ONLY = "어느 건물인가요? (예: 혜인관)"
-ASK_FLOOR4 = "{building}에는 4층 표기가 없어요. 직접 세어 보신 층이 맞나요? 아니라면 실제 층을 알려주세요."
+ASK_FLOOR4 = (
+    "{building}에는 4층이 없는 걸로 알고 있어요. 몇 층인지 다시 한번 확인해 주시겠어요? "
+    "(정말 4층이 맞다면 '4층이 맞아요'라고 해 주세요)"
+)
+FLOOR4_CHOICES = ["4층이 맞아요", "3층", "2층", "1층"]
+# 호수가 필요한 방 종류 (강의실은 여러 개라 어느 방인지 물음) / 방이 아닌 장소 선택지 (복도·화장실 등)
+ROOM_NEEDED = ("강의실", "실습실", "실험실", "연구실", "교수실", "사무실")
+PLACE_CHOICES = ["복도", "화장실", "계단", "엘리베이터", "로비·입구", "잘 모르겠어요"]
+ASK_ROOM = (
+    "몇 호 {detail}인가요? (예: 301호) 방이 아니라 복도·화장실 같은 곳이라면 그렇게 알려주세요."
+)
+ASK_PLACE = "어떤 장소인가요? 호수를 알려주시거나(예: 301호), 복도·화장실처럼 장소를 골라 주세요."
 # 건물까지만 알고 층·호수를 모를 때 한 번 더 (위치 되묻기와 별개로 1번 — 명세 4-1 개정)
 ASK_FLOOR = "{building}의 몇 층, 몇 호인가요? 모르시면 '잘 모르겠어요'라고 해주세요."
 FLOOR_CHOICES = ["1층", "2층", "3층", "잘 모르겠어요"]
@@ -58,11 +69,11 @@ ASK_EDIT = "어느 부분을 고칠까요? 바뀐 내용을 편하게 말씀해 
 SUMMARY_MARKER = "접수할까요?"
 SUMMARY_CHOICES = ["네, 접수해 주세요", "내용을 고칠래요", "취소할게요"]
 LOCATION_CHOICES = ["은주1관", "은주2관", "혜인관", "유담관", "상승관", "잘 모르겠어요"]
-FLOOR4_CHOICES = ["네, 맞아요"]
 # 저장하는 챗봇 메시지 종류 — Gemini가 말투를 바꿔도 종류는 chat_messages.debug_payload["kind"]로 알 수 있음
 KIND_OFFER, KIND_LOCATION, KIND_PROBLEM, KIND_SUMMARY, KIND_EDIT, KIND_FLOOR = (
     "offer", "location", "problem", "summary", "edit", "floor"
 )
+KIND_FLOOR4, KIND_PLACE = "floor4", "place"
 DONE_PREFIX = "신고가 접수됐어요"
 RESET_NOTE = "(새 대화를 시작했어요)"  # 페이지를 새로 열었을 때 진행 중이던 신고 흐름을 끝내는 표식
 THANKS_REPLY = "도움이 됐다니 다행이에요! 다른 불편한 점이 있으면 언제든 말씀해 주세요."
@@ -78,6 +89,7 @@ LOCATION_MARKERS = (
     ASK_BUILDING_ONLY,
 )
 ASK_LOC, ASK_PROB, ASK_FLR = "location", "problem", "floor"  # asked 집합에 들어가는 키
+ASK_FL4, ASK_PLC = "floor4", "place"
 
 # ── 카테고리 키워드 (카테고리 이름은 categories 테이블 시드값과 같아야 함) ──────────
 # 위에서부터 먼저 걸리는 카테고리로 정한다 → 구체적인 것(안전·전기·IT)을 일반적인 것(시설·설비)보다 위에.
@@ -219,6 +231,16 @@ def _resolve_eunju(text: str) -> tuple[str | None, bool]:
     return None, True
 
 
+def _short_name(name: str) -> str | None:
+    if not name.endswith("관") or name.startswith("은주") or len(name) < 3:
+        return None
+    return name[:-1]
+
+
+def _SHORT_RE(short: str) -> re.Pattern[str]:
+    return re.compile(re.escape(short) + _END)
+
+
 def _match_building(
     text: str, buildings: Sequence[BuildingRef]
 ) -> tuple[uuid.UUID | None, str | None, bool, str | None]:
@@ -242,6 +264,16 @@ def _match_building(
     for name in sorted(campus_rules()["buildings"], key=len, reverse=True):
         if name in text:
             return None, name, False, None
+    # 2-1) 약칭 — "북악", "혜인"처럼 끝의 "관"을 뺀 말 ("본관"·"은주"는 제외: 너무 흔하거나 1·2관이 갈림)
+    for b in buildings:
+        short = _short_name(b.name)
+        if short and _SHORT_RE(short).search(text):
+            return b.id, b.name, False, None
+    for name in campus_rules()["buildings"]:
+        short = _short_name(name)
+        if short and _SHORT_RE(short).search(text):
+            bid, official = _building_ref(name, buildings)
+            return bid, official, False, None
     # 3) 건물 이름처럼 생겼지만 목록에 없는 표현 → 건물로 받지 않음
     known_places = set(campus_rules()["facilities"]) | set(campus_rules()["outdoor_places"])
     m = _BUILDING_NUM_RE.search(text)
@@ -308,16 +340,21 @@ def extract_slots(
             building_id, building = _building_ref(fbuilding, buildings)
         floor = floor or ffloor
 
-    room = _ROOM_RE.search(text)
+    rooms = _ROOM_RE.findall(text)
+    room = rooms[-1] if rooms else None  # 여러 번 말했으면 마지막 (정정 반영)
     outdoor = _find_first(text, campus_rules()["outdoor_places"])  # 정문·서문 등 건물 밖 장소
-    generic = _find_first(text, DETAIL_PLACES)
+    generic = None
+    for line in reversed(text.split("\n")):  # 장소는 가장 나중에 말한 메시지 기준 ("강의실" → 답: "복도")
+        generic = _find_first(line, DETAIL_PLACES)
+        if generic:
+            break
     gender = _GENDER_TOILET_RE.search(text)
     if generic == "화장실" and gender:  # 남/여는 학생이 말했을 때만 기록 (추측 금지)
         generic = f"{gender.group(1)}자 화장실"
     if facility:
         detail: str | None = fname if not generic or generic in fname else f"{fname} {generic}"
     elif room:
-        detail = f"{room.group(1)}호" + (f" {generic}" if generic else "")
+        detail = f"{room}호" + (f" {generic}" if generic else "")
     elif outdoor and not building:
         detail = outdoor
     else:
@@ -421,7 +458,7 @@ def _has_problem_text(text: str) -> bool:
 
 def _apply_reply(extract: list[str], desc: list[str], prev_kind: str | None, text: str) -> None:
     """되묻기·요약 뒤에 온 사용자 메시지 하나를 추출용/상황용 목록에 반영."""
-    if prev_kind in (KIND_LOCATION, KIND_PROBLEM, KIND_OFFER, KIND_FLOOR) and is_question_like(text):
+    if prev_kind in (KIND_LOCATION, KIND_PROBLEM, KIND_OFFER, KIND_FLOOR, KIND_FLOOR4, KIND_PLACE) and is_question_like(text):
         return  # 되묻기와 상관없는 질문 — 위치로도 상황으로도 쓰지 않음
     extract.append(text)
     if prev_kind == KIND_PROBLEM or prev_kind is None or _has_problem_text(text):
@@ -443,6 +480,10 @@ def _message_kind(msg: MessageLike) -> str | None:
         return KIND_LOCATION
     if "몇 층, 몇 호인가요?" in content:
         return KIND_FLOOR
+    if "4층이 없는 걸로" in content:
+        return KIND_FLOOR4
+    if "몇 호 " in content and "인가요?" in content or ASK_PLACE in content:
+        return KIND_PLACE
     if ASK_PROBLEM in content:
         return KIND_PROBLEM
     return None
@@ -470,6 +511,10 @@ def collect_draft(history: Sequence[MessageLike]) -> Draft:
                 draft.asked.add(ASK_PROB)
             if prev_kind == KIND_FLOOR:
                 add_ask(draft.asked, ASK_FLR)
+            if prev_kind == KIND_FLOOR4:
+                add_ask(draft.asked, ASK_FL4)
+            if prev_kind == KIND_PLACE:
+                add_ask(draft.asked, ASK_PLC)
     last_is_report_reply = bool(history) and (
         history[-1].intent == ChatIntent.REPORT and history[-1].role == ChatRole.ASSISTANT
     )
@@ -573,7 +618,9 @@ def add_ask(asked: set[str], key: str) -> None:
     asked.add(key if n == 0 else f"{key}#{n + 1}")
 
 
-def next_question(slots: ReportSlots, asked: set[str], unsure: bool = False) -> Question | None:
+def next_question(
+    slots: ReportSlots, asked: set[str], unsure: bool = False, affirmed: bool = False
+) -> Question | None:
     """빠진 필수 슬롯에 대한 질문. None이면 요약 단계로 가도 됨.
 
     빠진 게 있으면 물어본다: 건물을 못 알아들었으면 다시 묻고(최대 MAX_LOC_ASKS번), 학생이 마지막 답에서
@@ -589,11 +636,6 @@ def next_question(slots: ReportSlots, asked: set[str], unsure: bool = False) -> 
                 ASK_UNKNOWN_BUILDING.format(name=slots.unknown_place), ASK_LOC,
                 [*names[:5], "잘 모르겠어요"], names,
             )
-        if slots.floor_check and slots.building and loc_asks == 0:
-            return Question(
-                ASK_FLOOR4.format(building=slots.building), ASK_LOC, list(FLOOR4_CHOICES),
-                [slots.building],
-            )
         if not slots.has_location:
             if loc_asks > 0:  # 이미 물었는데 건물을 못 알아들음 → 알아낸 것(층·장소)을 짚으며 건물만 다시
                 where = " ".join(
@@ -607,6 +649,19 @@ def next_question(slots: ReportSlots, asked: set[str], unsure: bool = False) -> 
                     list(LOCATION_CHOICES),
                 )
             return Question(ASK_LOCATION, ASK_LOC, list(LOCATION_CHOICES))
+    # 4층이 없는 건물에서 4층이라고 하면 확인 — "맞아요"라고 하면 그대로, 층만 바꿔 말하면 그 층으로
+    floor4_asks = _count_asks(asked, ASK_FL4)
+    if (
+        slots.floor_check
+        and slots.building
+        and floor4_asks < 2
+        and not affirmed
+        and not (unsure and floor4_asks > 0)
+    ):
+        return Question(
+            ASK_FLOOR4.format(building=slots.building), ASK_FL4, list(FLOOR4_CHOICES),
+            [slots.building, "4층"],
+        )
     # 건물은 아는데 층·호수를 전혀 모르면 묻기 (호수·특정 시설이 있으면 위치가 특정돼 생략)
     floor_asks = _count_asks(asked, ASK_FLR)
     if (
@@ -620,6 +675,22 @@ def next_question(slots: ReportSlots, asked: set[str], unsure: bool = False) -> 
             ASK_FLOOR.format(building=slots.building), ASK_FLR, list(FLOOR_CHOICES),
             [slots.building],
         )
+    # 층까지 알았으면 어느 방·장소인지 — 강의실 같은 방은 호수, 아무 장소도 모르면 복도·화장실 등을 고르게
+    place_asks = _count_asks(asked, ASK_PLC)
+    base_place = (slots.detail or "").split()[-1] if slots.detail else ""
+    if (
+        slots.building
+        and not slots.detail_specific
+        and (not slots.detail or base_place in ROOM_NEEDED)
+        and place_asks < 2
+        and not (unsure and place_asks > 0)
+    ):
+        if slots.detail:
+            return Question(
+                ASK_ROOM.format(detail=slots.detail), ASK_PLC, list(PLACE_CHOICES),
+                [slots.detail],
+            )
+        return Question(ASK_PLACE, ASK_PLC, list(PLACE_CHOICES))
     if not slots.has_problem and ASK_PROB not in asked:
         return Question(ASK_PROBLEM, ASK_PROB)
     return None

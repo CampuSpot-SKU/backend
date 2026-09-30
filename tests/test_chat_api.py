@@ -267,7 +267,8 @@ def test_switch_to_inquiry_by_text_during_flow(client: TestClient) -> None:
 def test_location_answer_is_not_added_to_description(client: TestClient) -> None:
     sid = new_session(client)
     begin(client, sid, "강의실 와이파이가 안 터져요")
-    second = send(client, sid, "혜인관 3층이요").json()
+    assert "몇 호 강의실인가요?" in send(client, sid, "혜인관 3층이요").json()["follow_up_question"]
+    second = send(client, sid, "301호요").json()
     assert second["confirm_required"] is True
     assert second["slots_filled"]["description"] == "강의실 와이파이가 안 터져요"
     assert "'강의실 와이파이가 안 터져요'" in second["summary"]  # "혜인관 3층이요"가 안 붙음
@@ -300,8 +301,10 @@ def test_floor_only_answer_asks_building_again(client: TestClient) -> None:
     again = send(client, sid, "3층").json()
     assert "confirm_required" not in again
     assert "어느 건물의 3층 강의실인가요?" in again["follow_up_question"]
-    summary = send(client, sid, "북악관").json()
-    assert "몇 층" not in summary["follow_up_question"]  # 층은 이미 앎
+    room = send(client, sid, "북악관").json()
+    assert "몇 층" not in room["follow_up_question"]  # 층은 이미 앎
+    assert "몇 호 강의실인가요?" in room["follow_up_question"]
+    summary = send(client, sid, "301호").json()
     assert summary["confirm_required"] is True
     assert summary["slots_filled"]["building"] == "북악관" and summary["slots_filled"]["floor"] == "3"
 
@@ -398,7 +401,8 @@ def test_eunju_unsure_keeps_raw_location(client: TestClient) -> None:
 def test_fourth_floor_in_building_without_one_asks_once(client: TestClient) -> None:
     sid = new_session(client)
     first = begin(client, sid, "대일관 4층 복도 조명이 깜빡거려요")
-    assert "4층 표기가 없어요" in first["follow_up_question"]
+    assert "대일관에는 4층이 없는 걸로 알고 있어요" in first["follow_up_question"]
+    assert first["choices"][0] == "4층이 맞아요"
     second = send(client, sid, "아 3층이에요").json()
     assert second["confirm_required"] is True
     assert second["slots_filled"]["floor"] == "3"
@@ -415,9 +419,13 @@ def test_generic_place_name_only_asks_for_building(client: TestClient) -> None:
     sid = new_session(client)
     first = begin(client, sid, "강의실 와이파이가 안 터져요")
     assert "어느 건물 몇 층 강의실인가요?" in first["follow_up_question"]
-    second = send(client, sid, "혜인관 3층이요").json()
+    room = send(client, sid, "혜인관 3층이요").json()
+    assert "몇 호 강의실인가요?" in room["follow_up_question"]  # 강의실은 여러 개 — 어느 방인지
+    assert room["choices"][:2] == ["복도", "화장실"]  # 방이 아닌 장소도 고를 수 있음
+    second = send(client, sid, "301호").json()
     assert second["confirm_required"] is True
     assert second["slots_filled"]["building"] == "혜인관"
+    assert second["slots_filled"]["detail"] == "301호 강의실"
 
 
 def test_floor_only_asks_location_once_then_summarizes(client: TestClient) -> None:
@@ -585,9 +593,12 @@ def test_offer_reply_with_info_skips_yes_and_continues(client: TestClient) -> No
     """"응" 대신 바로 위치를 말해도 수락으로 보고 이어감."""
     sid = new_session(client)
     send(client, sid, "3층 정수기가 고장났어요")
-    body = send(client, sid, "혜인관이에요").json()
+    ask = send(client, sid, "혜인관이에요").json()
+    assert "어떤 장소인가요?" in ask["follow_up_question"]  # 정수기가 어디 있는지 (복도·로비 등)
+    body = send(client, sid, "복도 쪽이에요").json()
     assert body["confirm_required"] is True
     assert body["slots_filled"]["building"] == "혜인관" and body["slots_filled"]["floor"] == "3"
+    assert body["slots_filled"]["detail"] == "복도"
 
 
 def test_edit_chip_asks_what_to_fix_then_summarizes_again(client: TestClient) -> None:
@@ -644,5 +655,46 @@ def test_unsure_floor_answer_does_not_ask_again(client: TestClient) -> None:
     sid = new_session(client)
     begin(client, sid, "강의실 와이파이가 안 터져요")
     send(client, sid, "북악관")
-    summary = send(client, sid, "잘 모르겠어요").json()
-    assert summary["confirm_required"] is True  # 층 질문도 1번뿐
+    room = send(client, sid, "잘 모르겠어요").json()  # 층을 모른다고 해도 어느 방인지는 물음
+    assert "몇 호 강의실인가요?" in room["follow_up_question"]
+    summary = send(client, sid, "몰라요").json()
+    assert summary["confirm_required"] is True  # 모른다고 하면 더 안 물음
+
+
+def test_screenshot_scenario_abbreviation_fourth_floor_and_room(client: TestClient) -> None:
+    """실제 화면 대화: "4층" → "북악"(약칭) → 4층 없는 건물 확인 → 층 정정 → 호수 → 확인 → 접수."""
+    sid = new_session(client)
+    begin(client, sid, "강의실 와이파이가 안 터져요")
+    building_ask = send(client, sid, "4층").json()
+    assert "어느 건물의 4층 강의실인가요?" in building_ask["follow_up_question"]
+    floor4 = send(client, sid, "북악").json()  # "북악" → 북악관
+    assert floor4["slots_filled"]["building"] == "북악관"
+    assert "북악관에는 4층이 없는 걸로 알고 있어요" in floor4["follow_up_question"]
+    room = send(client, sid, "3층이요").json()
+    assert room["slots_filled"]["floor"] == "3"
+    assert "몇 호 강의실인가요?" in room["follow_up_question"]
+    summary = send(client, sid, "301호").json()
+    assert summary["confirm_required"] is True
+    assert "북악관 3층 301호 강의실" in summary["summary"]
+    done = send(client, sid, "네, 접수해 주세요").json()
+    report = get_report(done["report"]["display_no"])
+    assert report.floor == "3" and report.detail == "301호 강의실"
+    assert report.building_id == building_id("북악관")
+
+
+def test_fourth_floor_yes_keeps_it_and_vague_reply_asks_once_more(client: TestClient) -> None:
+    sid = new_session(client)
+    begin(client, sid, "대일관 4층 복도 조명이 깜빡거려요")
+    again = send(client, sid, "어").json()  # 뭘 답한 건지 모호 → 한 번 더
+    assert "4층이 없는 걸로 알고 있어요" in again["follow_up_question"]
+    kept = send(client, sid, "4층이 맞아요").json()
+    assert kept["confirm_required"] is True and kept["slots_filled"]["floor"] == "4"
+
+
+def test_place_choice_corridor_replaces_room_question(client: TestClient) -> None:
+    sid = new_session(client)
+    begin(client, sid, "강의실 와이파이가 안 터져요")
+    send(client, sid, "혜인관 3층")
+    body = send(client, sid, "복도").json()  # 강의실이 아니라 복도 — 호수를 더 안 물음
+    assert body["confirm_required"] is True
+    assert body["slots_filled"]["detail"] == "복도"

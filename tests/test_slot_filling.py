@@ -192,7 +192,7 @@ def test_fourth_floor_in_building_without_it() -> None:
     assert not extract_slots("혜인관 4층 화장실 물이 새요").floor_check  # 4층이 있는 건물
     assert not extract_slots("대일관 3층 화장실 물이 새요").floor_check
     q = next_question(extract_slots("대일관 4층 복도 조명이 깜빡거려요"), set())
-    assert q is not None and "대일관에는 4층 표기가 없어요" in q.text
+    assert q is not None and "대일관에는 4층이 없는 걸로 알고 있어요" in q.text
 
 
 def test_later_floor_wins_on_correction() -> None:
@@ -454,3 +454,32 @@ def test_draft_with_reply_follows_last_question_kind() -> None:
     # 상황을 되물은 뒤의 답은 상황으로 씀
     history = [Msg(U, "3동 2층 화장실이요", REPORT), Msg(A, ASK_PROBLEM, REPORT)]
     assert collect_draft(history).with_reply("물이 새요")[1] == ["3동 2층 화장실이요", "물이 새요"]
+
+
+def test_building_abbreviation_is_recognized() -> None:
+    assert extract_slots("북악 4층").building == "북악관"
+    assert extract_slots("혜인 3층 화장실").building == "혜인관"
+    assert extract_slots("은주 3층").building != "은주1관"  # 은주는 1·2관이 갈려 약칭으로 받지 않음
+    assert extract_slots("본 건물 3층").building is None
+
+
+def test_detail_uses_latest_place_and_room() -> None:
+    assert extract_slots("강의실 와이파이가 안 터져요\n혜인관 3층 복도").detail == "복도"
+    assert extract_slots("강의실 와이파이가 안 터져요\n301호").detail == "301호 강의실"
+    assert extract_slots("301호 강의실 프로젝터\n아니 302호요").detail == "302호 강의실"
+
+
+def test_room_and_place_questions() -> None:
+    slots = extract_slots("혜인관 3층 강의실 와이파이가 안 터져요")
+    q = next_question(slots, set())
+    assert q is not None and q.key == "place" and "몇 호 강의실인가요?" in q.text
+    assert q.choices is not None and "복도" in q.choices and q.choices[-1] == "잘 모르겠어요"
+    # 호수가 있거나 방이 아닌 장소(복도·화장실)면 더 안 물음
+    assert next_question(extract_slots("혜인관 3층 301호 강의실 와이파이가 안 터져요"), set()) is None
+    assert next_question(extract_slots("혜인관 3층 복도 조명이 깜빡거려요"), set()) is None
+    # 장소를 전혀 모르면 호수·장소를 고르게 물음
+    none_q = next_question(extract_slots("혜인관 3층 와이파이가 안 터져요"), set())
+    assert none_q is not None and none_q.key == "place" and "어떤 장소인가요?" in none_q.text
+    # 모른다고 하면 중단, 최대 2번
+    assert next_question(slots, {"place"}, unsure=True) is None
+    assert next_question(slots, {"place", "place#2"}) is None

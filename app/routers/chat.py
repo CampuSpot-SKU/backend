@@ -405,7 +405,8 @@ def _report_step(
 
     # 학생이 마지막 답에서 "모르겠어요"라고 했으면 그 항목은 다시 묻지 않음
     unsure = bool(texts) and any(w in texts[-1] for w in UNKNOWN_WORDS)
-    question = next_question(slots, asked, unsure)
+    affirmed = bool(texts) and "맞" in texts[-1]  # "4층이 맞아요" 같은 확인
+    question = next_question(slots, asked, unsure, affirmed)
     if question is not None:
         base = (INTRO if intro else "") + question.text
         content = phrase(question.key, base, question.must_include)
