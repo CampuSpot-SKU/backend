@@ -22,7 +22,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -50,6 +50,7 @@ from app.services.slot_filling import (
     CANCEL_HINT,
     CANCELLED,
     DONE_PREFIX,
+    RESET_NOTE,
     START_GREETING,
     THANKS_REPLY,
     Draft,
@@ -100,6 +101,43 @@ def create_session(db: DbSession) -> SessionCreated:
     return SessionCreated(session_id=session.id)
 
 
+def _recent_history(db: Session, session_id: uuid.UUID) -> list[ChatMessage]:
+    recent = db.scalars(
+        select(ChatMessage)
+        .where(ChatMessage.session_id == session_id)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(HISTORY_LOOKBACK)
+    ).all()
+    return list(reversed(recent))
+
+
+@router.post(
+    "/sessions/{session_id}/reset",
+    status_code=204,
+    responses={404: {"description": "세션 없음"}, 429: {"description": "세션당 요청 한도 초과"}},
+)
+@limiter.limit(chat_rate_limit)
+def reset_flow(
+    request: Request,  # slowapi가 요구 (레이트 리미팅 키 계산용)
+    session_id: uuid.UUID,
+    db: DbSession,
+) -> Response:
+    """진행 중이던 신고 흐름을 끝냄 — 프론트가 페이지를 새로 열 때(새로고침) 한 번 호출.
+
+    화면은 새로고침하면 대화 기록 없이 인사말만 보이는데 서버는 같은 session_id의 이전 대화를 기억하고
+    있어서, 끝나지 않은 신고에 새 입력이 "정정"으로 이어붙는 문제를 막는다. 세션은 그대로 둠
+    (본인 신고 조회가 session_id로 본인 확인을 하므로). 진행 중인 신고가 없으면 아무 일도 안 함.
+    """
+    if db.get(ChatSession, session_id) is None:
+        raise HTTPException(status_code=404, detail="대화 세션을 찾을 수 없어요.")
+    history = _recent_history(db, session_id)
+    if collect_draft(history).in_progress:
+        # intent 없는 챗봇 메시지 → collect_draft가 신고 흐름의 끝으로 봄
+        _add_message(db, session_id, ChatRole.ASSISTANT, RESET_NOTE, _next_ts(history))
+        db.commit()
+    return Response(status_code=204)
+
+
 @router.post(
     "/sessions/{session_id}/messages",
     response_model=ChatReply,
@@ -128,13 +166,7 @@ def send_message(
     if not text:
         raise HTTPException(status_code=422, detail="메시지가 비어 있어요.")
 
-    recent = db.scalars(
-        select(ChatMessage)
-        .where(ChatMessage.session_id == session_id)
-        .order_by(ChatMessage.created_at.desc())
-        .limit(HISTORY_LOOKBACK)
-    ).all()
-    history = list(reversed(recent))
+    history = _recent_history(db, session_id)
     draft = collect_draft(history)
     user_msg = _add_message(db, session_id, ChatRole.USER, text, _next_ts(history))
     action = body.action

@@ -465,6 +465,45 @@ def test_stale_confirm_without_flow_starts_from_form(client: TestClient) -> None
     assert report_count() == before
 
 
+# ── 페이지를 새로 열면 진행 중이던 신고 흐름이 끝남 (새로고침 문제) ─────────────────────
+def reset(client: TestClient, sid: str):  # type: ignore[no-untyped-def]
+    return client.post(f"/api/v1/chat/sessions/{sid}/reset")
+
+
+def test_reset_ends_in_progress_flow_so_old_input_does_not_leak(client: TestClient) -> None:
+    sid = new_session(client)
+    send(client, sid, "물이 계속 새요")  # 위치를 되묻는 중에 페이지를 새로 엶
+    assert reset(client, sid).status_code == 204
+    body = send(client, sid, "혜인관 2층 화장실 물이 계속 새요").json()
+    assert body["confirm_required"] is True
+    # 예전 입력("물이 계속 새요")이 상황에 섞이지 않음
+    assert body["slots_filled"]["description"] == "혜인관 2층 화장실 물이 계속 새요"
+    assert body["summary"].startswith("신고 접수를 도와드릴게요.")  # 새 신고로 시작
+
+
+def test_reset_ends_flow_at_summary_stage(client: TestClient) -> None:
+    sid = new_session(client)
+    before = report_count()
+    assert send(client, sid, "혜인관 2층 화장실 물이 계속 새요").json()["confirm_required"] is True
+    assert reset(client, sid).status_code == 204
+    # 요약이 떠 있던 상태였어도 새 입력은 정정이 아니라 새 신고 — 접수는 만들어지지 않음
+    body = send(client, sid, "휴학 신청 어떻게 해요?")
+    assert body.headers["content-type"].startswith("text/event-stream")
+    assert report_count() == before
+
+
+def test_reset_without_flow_is_noop(client: TestClient) -> None:
+    sid = new_session(client)
+    assert reset(client, sid).status_code == 204  # 대화가 없어도 오류 아님
+    send(client, sid, "휴학 신청 어떻게 해요?")
+    assert reset(client, sid).status_code == 204
+    assert reset(client, sid).status_code == 204
+
+
+def test_reset_unknown_session_404(client: TestClient) -> None:
+    assert reset(client, "00000000-0000-0000-0000-000000000000").status_code == 404
+
+
 def test_locations_endpoint(client: TestClient) -> None:
     res = client.get("/api/v1/locations")
     assert res.status_code == 200
