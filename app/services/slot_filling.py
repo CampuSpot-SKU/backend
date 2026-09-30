@@ -31,7 +31,6 @@ from typing import Any, Protocol
 from app.models.enums import ChatIntent, ChatRole, Level
 
 # ── 챗봇 문구 ────────────────────────────────────────────────────────────────
-CANCEL_HINT = "\n(신고를 그만두려면 '취소'라고 입력해 주세요)"
 ASK_LOCATION = "어디에서 생긴 문제인가요? 건물·층·장소를 알려주세요. (예: 혜인관 2층 화장실)"
 # 강의실·복도처럼 어디에나 있는 장소 이름만 말했을 때 (건물이 빠짐)
 ASK_LOCATION_GENERIC = "어느 건물 몇 층 {detail}인가요? (예: 은주1관 3층 {detail})"
@@ -46,11 +45,19 @@ ASK_FLOOR4 = "{building}에는 4층 표기가 없어요. 직접 세어 보신 �
 ASK_PROBLEM = "어떤 문제인지 조금 더 자세히 알려주시겠어요? (예: 물이 새요, 불이 안 켜져요)"
 CANCELLED = "신고 접수를 취소했어요. 다른 도움이 필요하면 편하게 말씀해 주세요."
 CANCEL_WORDS = ("취소", "그만", "안 할래", "안할래")
-START_GREETING = "신고 접수를 도와드릴게요. "
-SUMMARY_PREFIX = "이 내용으로 신고를 접수할까요?"
-SUMMARY_HINT = (
-    "접수하려면 [접수], 고치려면 [수정], 그만두려면 [취소]를 눌러주세요.\n"
-    "(버튼이 안 보이면 '접수' 또는 '취소'라고 입력해도 돼요)"
+# 대화형 신고 흐름 (명세 4-1): 접수 제안 → (응) → 필요한 정보 묻기 → 문장으로 확인 → 접수
+OFFER_MARKER = "접수를 도와드릴까요?"
+OFFER_CHOICES = ["네, 접수해 주세요", "아니요, 안내만 받을게요"]
+INTRO = "필요한 정보를 물어볼게요. "
+DECLINED = "알겠어요, 접수는 하지 않을게요. 궁금한 게 있으면 편하게 물어봐 주세요."
+ASK_EDIT = "어느 부분을 고칠까요? 바뀐 내용을 편하게 말씀해 주세요."
+SUMMARY_MARKER = "접수할까요?"
+SUMMARY_CHOICES = ["네, 접수해 주세요", "내용을 고칠래요", "취소할게요"]
+LOCATION_CHOICES = ["은주1관", "은주2관", "혜인관", "유담관", "상승관", "잘 모르겠어요"]
+FLOOR4_CHOICES = ["네, 맞아요"]
+# 저장하는 챗봇 메시지 종류 — Gemini가 말투를 바꿔도 종류는 chat_messages.debug_payload["kind"]로 알 수 있음
+KIND_OFFER, KIND_LOCATION, KIND_PROBLEM, KIND_SUMMARY, KIND_EDIT = (
+    "offer", "location", "problem", "summary", "edit"
 )
 DONE_PREFIX = "신고가 접수됐어요"
 RESET_NOTE = "(새 대화를 시작했어요)"  # 페이지를 새로 열었을 때 진행 중이던 신고 흐름을 끝내는 표식
@@ -368,6 +375,7 @@ class MessageLike(Protocol):
     content: str
     intent: ChatIntent | None
     intent_scores: dict[str, Any] | None
+    # (선택) 챗봇 메시지의 {"kind": ...} — 없으면 문구 표식으로 알아봄
 
 
 @dataclass
@@ -383,7 +391,7 @@ class Draft:
     safety_concern: bool = False
     in_progress: bool = False  # 직전 챗봇 메시지가 신고 흐름 안의 말(되묻기·요약)이었나
     confirming: bool = False  # 직전 챗봇 메시지가 요약 확인이었나 → 이번 메시지는 접수/수정/취소
-    last_kind: str | None = None  # 직전 챗봇 메시지 종류: "location" / "problem" / "summary"
+    last_kind: str | None = None  # 직전 챗봇 메시지 종류: offer / location / problem / summary / edit
 
     @property
     def text(self) -> str:
@@ -407,20 +415,28 @@ def _has_problem_text(text: str) -> bool:
 
 def _apply_reply(extract: list[str], desc: list[str], prev_kind: str | None, text: str) -> None:
     """되묻기·요약 뒤에 온 사용자 메시지 하나를 추출용/상황용 목록에 반영."""
-    if prev_kind in ("location", "problem") and is_question_like(text):
+    if prev_kind in (KIND_LOCATION, KIND_PROBLEM, KIND_OFFER) and is_question_like(text):
         return  # 되묻기와 상관없는 질문 — 위치로도 상황으로도 쓰지 않음
     extract.append(text)
-    if prev_kind == "problem" or prev_kind is None or _has_problem_text(text):
+    if prev_kind == KIND_PROBLEM or prev_kind is None or _has_problem_text(text):
         desc.append(text)
 
 
-def _message_kind(content: str) -> str | None:
-    if SUMMARY_PREFIX in content:
-        return "summary"
+def _message_kind(msg: MessageLike) -> str | None:
+    payload = getattr(msg, "debug_payload", None)
+    if isinstance(payload, dict) and payload.get("kind"):
+        return str(payload["kind"])
+    content = msg.content  # 이전 버전·테스트 메시지: 고정 문구 표식으로 알아봄
+    if SUMMARY_MARKER in content:
+        return KIND_SUMMARY
+    if OFFER_MARKER in content:
+        return KIND_OFFER
+    if ASK_EDIT in content:
+        return KIND_EDIT
     if any(m in content for m in LOCATION_MARKERS):
-        return "location"
+        return KIND_LOCATION
     if ASK_PROBLEM in content:
-        return "problem"
+        return KIND_PROBLEM
     return None
 
 
@@ -439,17 +455,17 @@ def collect_draft(history: Sequence[MessageLike]) -> Draft:
                 draft.safety_concern = True
             prev_kind = None
         else:
-            prev_kind = _message_kind(msg.content)
-            if prev_kind == "location":
+            prev_kind = _message_kind(msg)
+            if prev_kind == KIND_LOCATION:
                 draft.asked.add(ASK_LOC)
-            if ASK_PROBLEM in msg.content:
+            if prev_kind == KIND_PROBLEM:
                 draft.asked.add(ASK_PROB)
     last_is_report_reply = bool(history) and (
         history[-1].intent == ChatIntent.REPORT and history[-1].role == ChatRole.ASSISTANT
     )
     draft.in_progress = last_is_report_reply
-    draft.confirming = last_is_report_reply and SUMMARY_PREFIX in history[-1].content
-    draft.last_kind = _message_kind(history[-1].content) if last_is_report_reply else None
+    draft.last_kind = _message_kind(history[-1]) if last_is_report_reply else None
+    draft.confirming = draft.last_kind == KIND_SUMMARY
 
     # "계단이 미끄러운데 어떻게 해요?" → (애매함, 되묻기) → "신고해주세요" 흐름이면
     # 되묻기 직전의 원래 문장도 신고 내용에 포함 (그래야 상황을 다시 묻지 않음)
@@ -466,7 +482,7 @@ def collect_draft(history: Sequence[MessageLike]) -> Draft:
 
 
 def _compact(text: str) -> str:
-    return re.sub(r"[\s.!~?\[\]]+", "", text).lower()
+    return re.sub(r"[\s.,!~?\[\]]+", "", text).lower()
 
 
 def is_cancel(text: str) -> bool:
@@ -484,6 +500,31 @@ def is_confirm(text: str) -> bool:
         return True
     t = re.sub(r"^(네|넵|넹|예|응|웅)", "", t)  # "네 접수해 주세요"
     return t.startswith("접수") and len(t) <= 10 and not any(w in t for w in ("안", "말", "취소"))
+
+
+YES_HINTS = ("도와", "해줘", "해주세요", "부탁", "그렇게", "진행")
+NO_WORDS = ("아니", "싫", "괜찮", "됐어", "안 할", "안할", "필요 없", "필요없")
+EDIT_WORDS = ("고칠", "수정", "바꿀", "바꿔", "틀렸", "잘못", "다시")
+
+
+def is_yes(text: str) -> bool:
+    """접수 제안에 대한 긍정 ("응", "네, 접수해 주세요", "도와주세요")."""
+    t = _compact(text)
+    return is_confirm(text) or (
+        len(t) <= 14 and any(w in t for w in YES_HINTS) and not is_no(text)
+    )
+
+
+def is_no(text: str) -> bool:
+    return any(w in text for w in NO_WORDS)
+
+
+def is_edit(text: str) -> bool:
+    """요약 확인 단계에서 "내용을 고칠래요"에 해당하는 짧은 말 (고칠 내용이 같이 들어 있으면 그 내용은 정정으로 처리)."""
+    t = _compact(text)
+    if t == _compact(SUMMARY_CHOICES[1]):
+        return True
+    return len(t) <= 5 and (any(w in t for w in EDIT_WORDS) or t.startswith("아니"))
 
 
 def wants_inquiry(text: str) -> bool:
@@ -504,7 +545,8 @@ def is_short_thanks(text: str) -> bool:
 class Question:
     text: str
     key: str  # ASK_LOC / ASK_PROB
-    choices: list[str] | None = None  # 화면에 버튼으로 보여줄 선택지 (은주관)
+    choices: list[str] | None = None  # 화면에 눌러서 고를 수 있는 추천 답변 (직접 입력도 가능)
+    must_include: list[str] = field(default_factory=list)  # 말투를 바꿔도 남아 있어야 하는 표현
 
 
 def next_question(slots: ReportSlots, asked: set[str]) -> Question | None:
@@ -514,15 +556,25 @@ def next_question(slots: ReportSlots, asked: set[str]) -> Question | None:
     """
     if ASK_LOC not in asked:
         if slots.ambiguous_building:
-            return Question(ASK_EUNJU, ASK_LOC, list(EUNJU_CHOICES))
+            return Question(ASK_EUNJU, ASK_LOC, list(EUNJU_CHOICES), ["은주1관", "은주2관"])
         if slots.unknown_place and not slots.building:
-            return Question(ASK_UNKNOWN_BUILDING.format(name=slots.unknown_place), ASK_LOC)
+            names: list[str] = list(campus_rules()["buildings"])
+            return Question(
+                ASK_UNKNOWN_BUILDING.format(name=slots.unknown_place), ASK_LOC,
+                [*names[:5], "잘 모르겠어요"], names,
+            )
         if slots.floor_check and slots.building:
-            return Question(ASK_FLOOR4.format(building=slots.building), ASK_LOC)
+            return Question(
+                ASK_FLOOR4.format(building=slots.building), ASK_LOC, list(FLOOR4_CHOICES),
+                [slots.building],
+            )
         if not slots.has_location:
             if slots.detail:  # 강의실·복도처럼 일반 장소 이름만 → 건물을 물음
-                return Question(ASK_LOCATION_GENERIC.format(detail=slots.detail), ASK_LOC)
-            return Question(ASK_LOCATION, ASK_LOC)
+                return Question(
+                    ASK_LOCATION_GENERIC.format(detail=slots.detail), ASK_LOC,
+                    list(LOCATION_CHOICES),
+                )
+            return Question(ASK_LOCATION, ASK_LOC, list(LOCATION_CHOICES))
     if not slots.has_problem and ASK_PROB not in asked:
         return Question(ASK_PROBLEM, ASK_PROB)
     return None
@@ -534,14 +586,27 @@ def _one_line(text: str, limit: int = 80) -> str:
     return line if len(line) <= limit else line[: limit - 1] + "…"
 
 
-def build_summary(slots: ReportSlots, texts: Sequence[str], greeting: bool) -> str:
-    """요약 확인 메시지 — SUMMARY_PREFIX로 시작해야 대화 재구성에서 인식됨."""
-    location = slots.location_text or "확인되지 않았어요 (담당자가 확인할게요)"
-    if slots.unknown_place and not slots.building:
-        location += " — 학교 건물 목록에 없는 이름이에요 (폼에서 고쳐 주세요)"
-    situation = _one_line(" ".join(texts)) if slots.has_problem else "확인되지 않았어요"
-    head = (START_GREETING if greeting else "") + SUMMARY_PREFIX
-    return f"{head}\n· 위치: {location}\n· 상황: {situation}\n{SUMMARY_HINT}"
+def build_offer(text: str) -> str:
+    """접수 제안 기본 문구 (Gemini가 말투를 바꿀 수 있음 — 접수를 도와드릴까요? 뜻은 유지)."""
+    return (
+        f"시설물 신고 접수에 관한 내용 같아요. '{_one_line(text, 40)}' 건으로 "
+        f"{OFFER_MARKER}"
+    )
+
+
+def build_summary(slots: ReportSlots, texts: Sequence[str]) -> str:
+    """접수 직전 확인 문구 — 목록이 아니라 문장 하나. SUMMARY_MARKER를 포함해야 이전 버전 재구성에서도 인식됨."""
+    situation = _one_line(" ".join(texts)) if slots.has_problem else "내용은 아직 확인이 안 됐어요"
+    if slots.location_text and not (slots.unknown_place and not slots.building):
+        body = f"{slots.location_text}에서 '{situation}' 문제예요."
+    elif slots.unknown_place and not slots.building:
+        body = (
+            f"'{situation}' 문제이고, '{slots.unknown_place}'은(는) 학교 건물 목록에 없어서 "
+            "위치는 담당자가 확인할게요."
+        )
+    else:
+        body = f"'{situation}' 문제이고, 위치는 담당자가 확인할게요."
+    return f"정리해 볼게요. {body} 이대로 {SUMMARY_MARKER}"
 
 
 def judge_reason(slots: ReportSlots, priority: str) -> str:

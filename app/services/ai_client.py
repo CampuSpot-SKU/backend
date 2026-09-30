@@ -61,3 +61,29 @@ def classify_intent(text: str, history: list[HistoryItem]) -> IntentResult:
     except (httpx.HTTPError, ValidationError, ValueError) as e:
         logger.warning("ai intent classify 실패: %s", e)
         raise AiServiceError(str(e)) from e
+
+
+SAY_TIMEOUT_SECONDS = 5.0  # 말투 다듬기는 없어도 되는 기능 — 오래 기다리지 않고 고정 문구로 넘어감
+
+
+def say_text(kind: str, base_text: str, must_include: list[str], history: list[HistoryItem]) -> str:
+    """신고 대화 문구를 Gemini가 자연스러운 말투로 다듬은 결과. 실패하면 base_text를 그대로 돌려줌.
+
+    뜻·순서는 backend 코드가 정한 그대로고 ai는 말투만 바꾼다 (ai `POST /api/v1/report/say`).
+    """
+    try:
+        url = _endpoint("/report/say")
+        payload = {
+            "kind": kind,
+            "base_text": base_text,
+            "must_include": must_include,
+            "history": [h.model_dump() for h in history[-4:]],
+        }
+        headers = {"X-Internal-Secret": get_settings().ai_service_secret}
+        res = httpx.post(url, json=payload, headers=headers, timeout=SAY_TIMEOUT_SECONDS)
+        res.raise_for_status()
+        text = str(res.json().get("text", "")).strip()
+    except (AiServiceError, httpx.HTTPError, ValueError) as e:
+        logger.info("말투 다듬기 실패 → 고정 문구 사용 (%s): %s", kind, e)
+        return base_text
+    return text if text and all(m in text for m in must_include) else base_text

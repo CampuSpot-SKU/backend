@@ -51,8 +51,8 @@ class ReportFollowUp(BaseModel):
     intent: Literal["report"] = "report"
     follow_up_question: str
     slots_filled: SlotsFilled
-    # 화면에 버튼으로 보여줄 선택지 (은주관 되묻기: ["은주1관", "은주2관", "잘 모르겠어요"]). 버튼을 누르면
-    # 그 글자를 일반 메시지로 보내면 됨. 없으면 null
+    # 눌러서 고를 수 있는 추천 답변 (접수 제안: ["네, 접수해 주세요", "아니요, 안내만 받을게요"] 등).
+    # 누르면 그 글자를 일반 메시지로 보내면 됨 (직접 입력도 항상 가능). 없으면 null
     choices: list[str] | None = None
 
 
@@ -64,6 +64,8 @@ class ReportConfirm(BaseModel):
     summary: str
     follow_up_question: str  # summary와 같은 문구 (1-5b 이전 화면이 글자로 보여줄 수 있게 하는 하위 호환)
     slots_filled: SlotsFilled
+    # 눌러서 고를 수 있는 추천 답변 ("네, 접수해 주세요" 등) — 직접 입력해도 됨
+    choices: list[str] | None = None
 
 
 class ReportCancelled(BaseModel):

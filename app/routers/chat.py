@@ -6,11 +6,13 @@
                                                   행정문의는 SSE 스트림
 흐름 (명세서 4-1 "신고 흐름 개편", 작업 1-3c):
   0) 접수 완료 직후의 짧은 인사("네", "고마워요")면 → 의도분류 없이 마무리 한 줄
-  1) 신고 흐름 중(되묻기·요약 확인에 대한 답변)이면 → 의도분류 없이 슬롯필링 계속
-       [취소] → 중단 / [안내만 받을래요] → 신고 흐름 종료, 행정문의로 답변
-       요약 확인 중 [접수] → 최종 폼 값으로 접수 / 그 밖의 말 → 정정 내용으로 보고 요약 다시
+  1) 신고 흐름 중(접수 제안·되묻기·확인에 대한 답변)이면 → 의도분류 없이 계속
+       "취소" → 중단 / "안내만" → 신고 흐름 종료, 행정문의로 답변 / 접수 제안에 "아니요" → 종료
+       확인 중 "네/접수" → 접수 / "고칠래요" → 무엇을 고칠지 묻기 / 그 밖의 말 → 정정으로 보고 다시 확인
+       (추천 답변 칩은 화면이 글자 그대로 메시지로 보냄 — 직접 입력과 같은 경로)
+       말투는 ai가 Gemini로 다듬고, 실패하면 고정 문구. 문구의 종류는 debug_payload.kind에 저장
   2) 아니면 ai 서비스로 의도분류 → report / inquiry / unclear
-  3) report: 대화에서 슬롯 추출 → 빠진 게 있으면 되묻기, 다 모이면 **요약 확인**(접수는 [접수] 후)
+  3) report: 먼저 "접수를 도와드릴까요?"(추천 답변 칩) → 응 → 빠진 정보를 대화로 묻기 → 문장으로 확인 → 접수
 판단 로직은 app/services/slot_filling.py, 접수 생성은 app/services/report_service.py.
 """
 import json
@@ -44,24 +46,40 @@ from app.schemas.chat import (
     SlotsFilled,
     Unclear,
 )
-from app.services.ai_client import AiServiceError, HistoryItem, IntentResult, classify_intent
+from app.services.ai_client import (
+    AiServiceError,
+    HistoryItem,
+    IntentResult,
+    classify_intent,
+    say_text,
+)
 from app.services.report_service import create_report, load_buildings
 from app.services.slot_filling import (
-    CANCEL_HINT,
+    ASK_EDIT,
     CANCELLED,
+    DECLINED,
     DONE_PREFIX,
+    INTRO,
+    KIND_EDIT,
+    KIND_OFFER,
+    KIND_SUMMARY,
+    OFFER_CHOICES,
     RESET_NOTE,
-    START_GREETING,
+    SUMMARY_CHOICES,
     THANKS_REPLY,
     Draft,
     ReportSlots,
     apply_form,
+    build_offer,
     build_summary,
     collect_draft,
     extract_slots,
     is_cancel,
     is_confirm,
+    is_edit,
+    is_no,
     is_short_thanks,
+    is_yes,
     judge_reason,
     next_question,
     wants_inquiry,
@@ -78,6 +96,9 @@ INQUIRY_PLACEHOLDER = (
 )
 
 IntentClassifier = Callable[[str, list[HistoryItem]], IntentResult]
+# (종류, 기본 문구, 남아 있어야 할 표현, 최근 대화) → 말투를 다듬은 문구. 실패하면 기본 문구
+Phraser = Callable[[str, str, list[str], list[HistoryItem]], str]
+Phrase = Callable[[str, str, list[str]], str]  # 대화 맥락을 미리 채운 형태
 
 
 def get_intent_classifier() -> IntentClassifier:
@@ -85,9 +106,15 @@ def get_intent_classifier() -> IntentClassifier:
     return classify_intent
 
 
+def get_phraser() -> Phraser:
+    """테스트에서 고정 문구(또는 가짜)로 바꿔 끼우기 위한 의존성."""
+    return say_text
+
+
 # 의존성은 Annotated로 선언 (FastAPI 권장 방식, ruff B008 대응)
 DbSession = Annotated[Session, Depends(get_db)]
 Classifier = Annotated[IntentClassifier, Depends(get_intent_classifier)]
+PhraserDep = Annotated[Phraser, Depends(get_phraser)]
 
 
 @router.post("/sessions", response_model=SessionCreated, status_code=201)
@@ -159,6 +186,7 @@ def send_message(
     body: MessageIn,
     db: DbSession,
     classify: Classifier,
+    phraser: PhraserDep,
 ) -> ChatReply | StreamingResponse:
     if db.get(ChatSession, session_id) is None:
         raise HTTPException(status_code=404, detail="대화 세션을 찾을 수 없어요.")
@@ -170,6 +198,11 @@ def send_message(
     draft = collect_draft(history)
     user_msg = _add_message(db, session_id, ChatRole.USER, text, _next_ts(history))
     action = body.action
+    say_history = [HistoryItem(role=m.role.value, content=m.content) for m in history[-3:]]
+    say_history.append(HistoryItem(role="user", content=text))
+
+    def phrase(kind: str, base: str, must: list[str]) -> str:
+        return phraser(kind, base, must, say_history)
 
     # 0) 접수 완료 직후의 인사·확인성 짧은 답 → 새 신고로 시작하지 않고 마무리 한 줄 (명세 4-1 보완 ②)
     if (
@@ -195,19 +228,37 @@ def send_message(
             return ReportCancelled(
                 message=CANCELLED, follow_up_question=CANCELLED, slots_filled=SlotsFilled()
             )
+        if draft.in_progress and action is None and draft.last_kind == KIND_OFFER:
+            # 접수 제안에 대한 답 — 거절이면 끝, 긍정이면 필요한 정보 묻기, 그 밖의 말은 추가 정보로 보고 이어감
+            if is_no(text):
+                _add_message(db, session_id, ChatRole.ASSISTANT, DECLINED, _after(user_msg))
+                db.commit()  # intent 없이 저장 → 신고 흐름 끝 표시
+                return ReportCancelled(
+                    message=DECLINED, follow_up_question=DECLINED, slots_filled=SlotsFilled()
+                )
+            if is_yes(text):
+                texts, descs = list(draft.user_texts), list(draft.desc_texts)
+            else:
+                texts, descs = draft.with_reply(text)
+            return _report_step(
+                db, session_id, user_msg, texts, descs, draft.asked, draft.safety_concern,
+                phrase, intro=True,
+            )
+        if draft.confirming and action is None and is_edit(text) and not is_confirm(text):
+            return _ask_edit(db, session_id, user_msg, draft, phrase)
         confirm = draft.in_progress and (
             action == "confirm_report" or (draft.confirming and action is None and is_confirm(text))
         )
         if action == "confirm_report" and not draft.in_progress:
             # 화면이 오래돼 서버엔 진행 중인 신고가 없음 → 폼에 적힌 내용으로 새로 시작해 요약부터
             texts = [t for t in [(body.draft.description if body.draft else None)] if t]
-            return _report_step(db, session_id, user_msg, texts, texts, set(), False, start=True)
+            return _report_step(db, session_id, user_msg, texts, texts, set(), False, phrase)
         if confirm:
             texts, descs = list(draft.user_texts), list(draft.desc_texts)
         else:
             texts, descs = draft.with_reply(text)  # 위치 답변·질문은 상황에서 빼는 규칙 적용
         return _report_step(
-            db, session_id, user_msg, texts, descs, draft.asked, draft.safety_concern,
+            db, session_id, user_msg, texts, descs, draft.asked, draft.safety_concern, phrase,
             confirm=confirm, form=body.draft if confirm else None,
         )
 
@@ -243,11 +294,12 @@ def send_message(
         db.commit()
         return StreamingResponse(_sse_once(INQUIRY_PLACEHOLDER), media_type="text/event-stream")
 
-    # 3) 신고 — 새로 시작 (애매함→신고로 이어진 경우 원래 문장도 draft에 포함돼 있음)
+    # 3) 신고 — 먼저 접수를 도와드릴지 물음 (애매함→신고로 이어진 경우 원래 문장도 draft에 포함돼 있음)
     user_msg.intent = ChatIntent.REPORT
-    return _report_step(db, session_id, user_msg, [*draft.user_texts, text],
-                        [*draft.desc_texts, text], draft.asked,
-                        draft.safety_concern or result.safety_concern, start=True)
+    return _offer(
+        db, session_id, user_msg, [*draft.user_texts, text], [*draft.desc_texts, text],
+        draft.safety_concern or result.safety_concern, phrase,
+    )
 
 
 def _just_reported(history: list[ChatMessage]) -> bool:
@@ -286,6 +338,43 @@ def _slots_filled(slots: ReportSlots, description: str | None) -> SlotsFilled:
     )
 
 
+def _offer(
+    db: Session,
+    session_id: uuid.UUID,
+    user_msg: ChatMessage,
+    texts: list[str],
+    descs: list[str],
+    safety_concern: bool,
+    phrase: Phrase,
+) -> ReportFollowUp:
+    """"시설물 신고 접수에 관한 내용 같아요. 접수를 도와드릴까요?" — 바로 묻지 않고 먼저 의사를 확인."""
+    slots = extract_slots("\n".join(texts), load_buildings(db), safety_concern)
+    content = phrase(KIND_OFFER, build_offer(" ".join(descs)), ["접수"])
+    reply = _add_message(db, session_id, ChatRole.ASSISTANT, content, _after(user_msg), KIND_OFFER)
+    reply.intent = ChatIntent.REPORT
+    db.commit()
+    return ReportFollowUp(
+        follow_up_question=content,
+        slots_filled=_slots_filled(slots, "\n".join(descs)),
+        choices=list(OFFER_CHOICES),
+    )
+
+
+def _ask_edit(
+    db: Session, session_id: uuid.UUID, user_msg: ChatMessage, draft: Draft, phrase: Phrase
+) -> ReportFollowUp:
+    """"내용을 고칠래요" — 무엇을 고칠지 묻고, 다음 말을 정정으로 받음."""
+    content = phrase(KIND_EDIT, ASK_EDIT, [])
+    reply = _add_message(db, session_id, ChatRole.ASSISTANT, content, _after(user_msg), KIND_EDIT)
+    reply.intent = ChatIntent.REPORT
+    db.commit()
+    slots = extract_slots(draft.text, [], draft.safety_concern)
+    return ReportFollowUp(
+        follow_up_question=content,
+        slots_filled=_slots_filled(slots, "\n".join(draft.desc_texts)),
+    )
+
+
 def _report_step(
     db: Session,
     session_id: uuid.UUID,
@@ -294,12 +383,13 @@ def _report_step(
     descs: list[str],  # 접수 상황(description)으로 쓸 메시지들
     asked: set[str],
     safety_concern: bool,
+    phrase: Phrase,
     *,
-    start: bool = False,
+    intro: bool = False,  # 접수 제안에 "응"이라고 답한 직후 — "필요한 정보를 물어볼게요."로 시작
     confirm: bool = False,
     form: DraftIn | None = None,
 ) -> ReportFollowUp | ReportConfirm | ReportCreated:
-    """슬롯을 뽑아서 되묻거나(빠진 게 있음), 요약을 보여주거나(다 모임), [접수] 확인이면 접수 생성."""
+    """슬롯을 뽑아서 되묻거나(빠진 게 있음), 문장으로 확인하거나(다 모임), 확인 답이면 접수 생성."""
     joined = "\n".join(texts)
     described = "\n".join(descs)
     buildings = load_buildings(db)
@@ -313,10 +403,11 @@ def _report_step(
         return _create(db, session_id, user_msg, slots, form_desc or described or joined)
 
     question = next_question(slots, asked)
-    greeting = START_GREETING if start else ""
     if question is not None:
-        content = greeting + question.text + CANCEL_HINT
-        reply = _add_message(db, session_id, ChatRole.ASSISTANT, content, _after(user_msg))
+        base = (INTRO if intro else "") + question.text
+        content = phrase(question.key, base, question.must_include)
+        kind = question.key  # ASK_LOC / ASK_PROB 값이 곧 저장하는 메시지 종류
+        reply = _add_message(db, session_id, ChatRole.ASSISTANT, content, _after(user_msg), kind)
         reply.intent = ChatIntent.REPORT  # 신고 흐름 계속 중이라는 표시 (다음 요청에서 재구성용)
         db.commit()
         return ReportFollowUp(
@@ -325,13 +416,18 @@ def _report_step(
             choices=question.choices,
         )
 
-    # 필수 항목이 찼거나 같은 질문을 이미 했음 → 바로 접수하지 않고 요약 확인
-    summary = build_summary(slots, descs, greeting=start)
-    reply = _add_message(db, session_id, ChatRole.ASSISTANT, summary, _after(user_msg))
+    # 필수 항목이 찼거나 같은 질문을 이미 했음 → 바로 접수하지 않고 문장으로 확인
+    base = build_summary(slots, descs)
+    must = [t for t in [slots.location_text] if t and t in base] + ["접수"]
+    summary = phrase(KIND_SUMMARY, base, must)
+    reply = _add_message(db, session_id, ChatRole.ASSISTANT, summary, _after(user_msg), KIND_SUMMARY)
     reply.intent = ChatIntent.REPORT
     db.commit()
     return ReportConfirm(
-        summary=summary, follow_up_question=summary, slots_filled=_slots_filled(slots, described)
+        summary=summary,
+        follow_up_question=summary,
+        slots_filled=_slots_filled(slots, described),
+        choices=list(SUMMARY_CHOICES),
     )
 
 
@@ -343,12 +439,11 @@ def _create(
     description: str,
 ) -> ReportCreated:
     report, category = create_report(db, session_id, slots, description=description)
+    where = f"{slots.location_text}에서 생긴 " if slots.location_text else ""
     done = (
-        f"{DONE_PREFIX}! 접수번호는 {report.display_no}번이에요.\n"
-        f"· 위치: {slots.location_text or '담당자가 확인할게요'}\n"
-        f"· 분류: {category.name} · 우선순위 {report.priority.value}\n"
-        f"· 판정 이유: {judge_reason(slots, report.priority.value)}\n"
-        "담당 부서에서 확인 후 처리할게요."
+        f"{DONE_PREFIX}! 접수번호는 {report.display_no}번이에요. "
+        f"{where}{category.name} 문제로 분류했어요. "
+        f"{judge_reason(slots, report.priority.value)} 담당 부서에서 확인 후 처리할게요."
     )
     # intent 없이 저장 → 신고 흐름 끝 표시 (다음 메시지는 새 대화로 시작)
     _add_message(db, session_id, ChatRole.ASSISTANT, done, _after(user_msg))
@@ -367,9 +462,16 @@ def _create(
 
 
 def _add_message(
-    db: Session, session_id: uuid.UUID, role: ChatRole, content: str, created_at: datetime
+    db: Session,
+    session_id: uuid.UUID,
+    role: ChatRole,
+    content: str,
+    created_at: datetime,
+    kind: str | None = None,  # 챗봇 메시지 종류 — 말투가 바뀌어도 대화 재구성에서 알아보게 저장
 ) -> ChatMessage:
     msg = ChatMessage(session_id=session_id, role=role, content=content, created_at=created_at)
+    if kind:
+        msg.debug_payload = {"kind": kind}
     db.add(msg)
     return msg
 

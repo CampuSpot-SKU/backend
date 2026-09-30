@@ -12,18 +12,21 @@ from app.services.slot_filling import (
     ASK_LOCATION,
     ASK_PROB,
     ASK_PROBLEM,
-    CANCEL_HINT,
     EUNJU_CHOICES,
-    START_GREETING,
-    SUMMARY_PREFIX,
+    OFFER_MARKER,
+    SUMMARY_MARKER,
     BuildingRef,
     apply_form,
+    build_offer,
     build_summary,
     collect_draft,
     extract_slots,
     is_cancel,
     is_confirm,
+    is_edit,
+    is_no,
     is_short_thanks,
+    is_yes,
     judge_reason,
     next_question,
     wants_inquiry,
@@ -36,6 +39,7 @@ class Msg:
     content: str
     intent: ChatIntent | None = None
     intent_scores: dict[str, Any] | None = None
+    debug_payload: dict[str, Any] | None = None
 
 
 U, A = ChatRole.USER, ChatRole.ASSISTANT
@@ -265,7 +269,7 @@ def test_draft_in_progress_after_follow_up() -> None:
         Msg(U, "휴학 어떻게 해요?", ChatIntent.INQUIRY),
         Msg(A, "준비 중이에요", ChatIntent.INQUIRY),
         Msg(U, "물이 계속 새요", REPORT, {"safety_concern": True}),
-        Msg(A, ASK_LOCATION + CANCEL_HINT, REPORT),
+        Msg(A, ASK_LOCATION, REPORT),
     ]
     draft = collect_draft(history)
     assert draft.in_progress
@@ -301,7 +305,7 @@ def test_is_cancel() -> None:
 def test_draft_recognizes_questions_after_greeting() -> None:
     history = [
         Msg(U, "은주관 화장실 물이 새요", REPORT),
-        Msg(A, START_GREETING + ASK_EUNJU + CANCEL_HINT, REPORT),
+        Msg(A, ASK_EUNJU, REPORT),
     ]
     draft = collect_draft(history)
     assert draft.in_progress and not draft.confirming
@@ -310,23 +314,72 @@ def test_draft_recognizes_questions_after_greeting() -> None:
 
 def test_draft_confirming_after_summary() -> None:
     slots = extract_slots("3동 2층 화장실 물이 새요")
-    summary = build_summary(slots, ["3동 2층 화장실 물이 새요"], greeting=True)
+    summary = build_summary(slots, ["3동 2층 화장실 물이 새요"])
     history = [Msg(U, "3동 2층 화장실 물이 새요", REPORT), Msg(A, summary, REPORT)]
     draft = collect_draft(history)
     assert draft.in_progress and draft.confirming
     assert draft.user_texts == ["3동 2층 화장실 물이 새요"]
 
 
-def test_summary_text() -> None:
-    slots = extract_slots("3동 2층 화장실 물이 계속 새요")
-    text = build_summary(slots, ["3동 2층 화장실 물이 계속 새요"], greeting=True)
-    assert text.startswith(START_GREETING + SUMMARY_PREFIX)
-    assert "· 위치: 3동 2층 화장실" in text and "· 상황: 3동 2층 화장실 물이 계속 새요" in text
-    assert "[접수]" in text and "[취소]" in text
-    assert not build_summary(slots, ["x"], greeting=False).startswith(START_GREETING)
-    # 위치를 끝내 모르면 그대로 알림 (관리자가 확인)
-    empty = build_summary(extract_slots("물이 새요"), ["물이 새요"], greeting=False)
-    assert "확인되지 않았어요" in empty
+def test_summary_is_one_sentence_not_a_list() -> None:
+    slots = extract_slots("혜인관 2층 화장실 물이 계속 새요")
+    text = build_summary(slots, ["혜인관 2층 화장실 물이 계속 새요"])
+    assert SUMMARY_MARKER in text
+    assert "혜인관 2층 화장실에서" in text and "물이 계속 새요" in text
+    assert "위치:" not in text and "상황:" not in text and "·" not in text and "\n" not in text
+    # 위치를 끝내 모르면 담당자가 확인한다고 말함
+    assert "담당자가 확인" in build_summary(extract_slots("물이 새요"), ["물이 새요"])
+
+
+def test_offer_text() -> None:
+    text = build_offer("3층 정수기가 고장났어요")
+    assert OFFER_MARKER in text and "3층 정수기가 고장났어요" in text
+
+
+def test_draft_kind_from_payload_survives_rephrasing() -> None:
+    """Gemini가 말투를 바꿔도(고정 문구 표식이 없어도) 저장된 kind로 단계를 알아봄."""
+    history = [
+        Msg(U, "3층 정수기가 고장났어요", REPORT),
+        Msg(A, "정수기 문제시군요! 접수 도와드릴까요?", REPORT, debug_payload={"kind": "offer"}),
+    ]
+    draft = collect_draft(history)
+    assert draft.in_progress and draft.last_kind == "offer" and not draft.confirming
+    history += [
+        Msg(U, "응", REPORT),
+        Msg(A, "어느 건물이에요?", REPORT, debug_payload={"kind": "location"}),
+    ]
+    assert collect_draft(history).asked == {ASK_LOC}
+    history += [
+        Msg(U, "혜인관이요", REPORT),
+        Msg(A, "이렇게 접수하면 될까요?", REPORT, debug_payload={"kind": "summary"}),
+    ]
+    assert collect_draft(history).confirming
+
+
+def test_offer_reply_question_is_ignored() -> None:
+    draft = collect_draft([
+        Msg(U, "물이 새요", REPORT),
+        Msg(A, build_offer("물이 새요"), REPORT),
+    ])
+    assert draft.last_kind == "offer"
+    assert draft.with_reply("정수기가 뭐예요?") == (["물이 새요"], ["물이 새요"])
+    assert draft.with_reply("혜인관 3층이에요")[0][-1] == "혜인관 3층이에요"
+
+
+@pytest.mark.parametrize("text", ["응", "네", "네, 접수해 주세요", "도와주세요", "그렇게 해줘", "ㅇㅇ"])
+def test_is_yes_true(text: str) -> None:
+    assert is_yes(text)
+
+
+@pytest.mark.parametrize("text", ["아니요", "아니요, 안내만 받을게요", "괜찮아요", "혜인관 3층이에요"])
+def test_is_yes_false(text: str) -> None:
+    assert not is_yes(text)
+
+
+def test_is_no_and_edit() -> None:
+    assert is_no("아니요") and not is_no("응")
+    assert is_edit("내용을 고칠래요") and is_edit("아니요") and is_edit("수정")
+    assert not is_edit("아니 4층이에요 혜인관 4층")  # 고칠 내용이 같이 오면 정정으로 처리
 
 
 @pytest.mark.parametrize("text", ["접수", "네", "[접수]", "응!", "네 접수해 주세요", "좋아요", "접수할게요"])
@@ -364,7 +417,7 @@ def test_judge_reason() -> None:
 def test_draft_description_excludes_location_answers_and_questions() -> None:
     history = [
         Msg(U, "강의실 와이파이가 안 터져요", REPORT),
-        Msg(A, START_GREETING + "어느 건물 몇 층 강의실인가요? (예: 은주1관 3층 강의실)" + CANCEL_HINT, REPORT),
+        Msg(A, "어느 건물 몇 층 강의실인가요? (예: 은주1관 3층 강의실)", REPORT),
         Msg(U, "3동이 우리학교에 있어?", REPORT),
         Msg(A, "어느 건물 몇 층 강의실인가요?", REPORT),
         Msg(U, "혜인관 3층이요", REPORT),
@@ -378,12 +431,12 @@ def test_draft_description_excludes_location_answers_and_questions() -> None:
 def test_draft_with_reply_follows_last_question_kind() -> None:
     history = [
         Msg(U, "물이 새요", REPORT),
-        Msg(A, ASK_LOCATION + CANCEL_HINT, REPORT),
+        Msg(A, ASK_LOCATION, REPORT),
     ]
     draft = collect_draft(history)
     assert draft.last_kind == "location"
     assert draft.with_reply("3동 2층 화장실이요") == (["물이 새요", "3동 2층 화장실이요"], ["물이 새요"])
     assert draft.with_reply("여기 어디예요?") == (["물이 새요"], ["물이 새요"])
     # 상황을 되물은 뒤의 답은 상황으로 씀
-    history = [Msg(U, "3동 2층 화장실이요", REPORT), Msg(A, ASK_PROBLEM + CANCEL_HINT, REPORT)]
+    history = [Msg(U, "3동 2층 화장실이요", REPORT), Msg(A, ASK_PROBLEM, REPORT)]
     assert collect_draft(history).with_reply("물이 새요")[1] == ["3동 2층 화장실이요", "물이 새요"]

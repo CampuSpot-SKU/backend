@@ -7,6 +7,7 @@ ai 서비스는 호출하지 않고 가짜 분류기로 대체한다 (Gemini 불
 import json
 import os
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 
@@ -24,7 +25,7 @@ from app.db.session import get_engine, get_sessionmaker
 from app.main import app
 from app.models import Building, Report, ReportStatusHistory
 from app.models.enums import ReportStatus
-from app.routers.chat import get_intent_classifier
+from app.routers.chat import get_intent_classifier, get_phraser
 from app.services.ai_client import AiServiceError, HistoryItem, IntentResult
 
 # 문장 → 가짜 의도분류 결과 (명세서 4-4 few-shot과 같은 판정)
@@ -84,6 +85,14 @@ def send(  # type: ignore[no-untyped-def]
     return client.post(f"/api/v1/chat/sessions/{sid}/messages", json=payload)
 
 
+def begin(client: TestClient, sid: str, text: str) -> dict[str, Any]:
+    """신고 문장을 보내 접수 제안을 받고, "네, 접수해 주세요"로 수락한 뒤의 응답 (대화형 흐름 4-1)."""
+    offer = send(client, sid, text).json()
+    assert offer["intent"] == "report" and "confirm_required" not in offer, offer
+    assert offer["choices"] == ["네, 접수해 주세요", "아니요, 안내만 받을게요"]
+    return send(client, sid, "네, 접수해 주세요").json()  # type: ignore[no-any-return]
+
+
 def report_count() -> int:
     db = get_sessionmaker()()
     try:
@@ -120,13 +129,13 @@ def sse_text(res) -> str:  # type: ignore[no-untyped-def]
 def test_summary_then_confirm_by_text(client: TestClient) -> None:
     sid = new_session(client)
     before = report_count()
-    res = send(client, sid, "혜인관 2층 화장실 물이 계속 새요")
-    assert res.status_code == 200
-    body = res.json()
+    body = begin(client, sid, "혜인관 2층 화장실 물이 계속 새요")
     # 슬롯이 다 차도 바로 접수하지 않고 요약 확인
     assert body["intent"] == "report" and body["confirm_required"] is True
     assert "report_created" not in body and report_count() == before
-    assert body["summary"].startswith("신고 접수를 도와드릴게요. 이 내용으로 신고를 접수할까요?")
+    assert "접수할까요?" in body["summary"] and "혜인관 2층 화장실에서" in body["summary"]
+    assert "위치:" not in body["summary"] and "상황:" not in body["summary"]  # 목록 형식 아님
+    assert body["choices"] == ["네, 접수해 주세요", "내용을 고칠래요", "취소할게요"]
     assert body["follow_up_question"] == body["summary"]  # 하위 호환
     assert body["slots_filled"]["building"] == "혜인관"
     assert body["slots_filled"]["floor"] == "2"
@@ -142,7 +151,8 @@ def test_summary_then_confirm_by_text(client: TestClient) -> None:
     assert r["status"] == "접수"
     assert report_count() == before + 1
     assert f"접수번호는 {r['display_no']}번" in done["message"]
-    assert "위치: 혜인관 2층 화장실" in done["message"] and "판정 이유" in done["message"]
+    assert "혜인관 2층 화장실에서 생긴" in done["message"] and "P2로 판단했어요" in done["message"]
+    assert "위치:" not in done["message"]
 
     db = get_sessionmaker()()
     report = db.scalar(select(Report).where(Report.display_no == r["display_no"]))
@@ -160,7 +170,7 @@ def test_summary_then_confirm_by_text(client: TestClient) -> None:
 
 def test_confirm_button_uses_final_form_values(client: TestClient) -> None:
     sid = new_session(client)
-    body = send(client, sid, "혜인관 2층 화장실 물이 계속 새요").json()
+    body = begin(client, sid, "혜인관 2층 화장실 물이 계속 새요")
     assert body["confirm_required"] is True
     form = {"building": "혜인관", "floor": "7", "detail": "701호", "description": "화장실 물이 새요"}
     done = send(client, sid, "접수", action="confirm_report", draft=form).json()
@@ -169,12 +179,12 @@ def test_confirm_button_uses_final_form_values(client: TestClient) -> None:
     assert report.building_id == building_id("혜인관")  # 폼의 건물 이름 → 건물 목록과 매칭
     assert report.floor == "7" and report.detail == "701호"
     assert report.location_raw is None
-    assert "위치: 혜인관 7층 701호" in done["message"]
+    assert "혜인관 7층 701호에서 생긴" in done["message"]
 
 
 def test_form_with_custom_building_text_is_kept_as_raw(client: TestClient) -> None:
     sid = new_session(client)
-    send(client, sid, "혜인관 2층 화장실 물이 계속 새요")
+    begin(client, sid, "혜인관 2층 화장실 물이 계속 새요")
     form = {"building": "체육관 옆 창고", "floor": "", "detail": "", "description": ""}
     done = send(client, sid, "접수", action="confirm_report", draft=form).json()
     assert done["report_created"] is True
@@ -184,16 +194,15 @@ def test_form_with_custom_building_text_is_kept_as_raw(client: TestClient) -> No
 
 def test_slot_filling_asks_location_then_summary_then_creates(client: TestClient) -> None:
     sid = new_session(client)
-    first = send(client, sid, "물이 계속 새요").json()
+    first = begin(client, sid, "물이 계속 새요")
     assert first["intent"] == "report" and "confirm_required" not in first
-    assert first["follow_up_question"].startswith("신고 접수를 도와드릴게요. 어디에서")
+    assert first["follow_up_question"].startswith("필요한 정보를 물어볼게요. 어디에서")
     assert first["slots_filled"]["location"] is None
     assert first["slots_filled"]["building"] is None  # 1-3c 형식: 필드는 항상 있음(값이 null)
-    assert first["choices"] is None
+    assert first["choices"][:2] == ["은주1관", "은주2관"]  # 추천 답변 (직접 입력도 가능)
     # 답변은 의도분류 없이 이어서 처리 (FAKE에 없는 문장이어도 됨)
     second = send(client, sid, "혜인관 2층 화장실이요").json()
     assert second["confirm_required"] is True
-    assert not second["summary"].startswith("신고 접수를 도와드릴게요")  # 인사는 시작에만
     third = send(client, sid, "접수", action="confirm_report").json()
     assert third["report_created"] is True
     # 접수 후 다음 메시지는 새 대화
@@ -203,7 +212,7 @@ def test_slot_filling_asks_location_then_summary_then_creates(client: TestClient
 
 def test_correction_in_summary_updates_and_summarizes_again(client: TestClient) -> None:
     sid = new_session(client)
-    send(client, sid, "혜인관 2층 화장실 물이 계속 새요")
+    begin(client, sid, "혜인관 2층 화장실 물이 계속 새요")
     again = send(client, sid, "아니 3층이에요").json()
     assert again["confirm_required"] is True
     assert again["slots_filled"]["floor"] == "3"  # 나중에 말한 층이 우선
@@ -214,7 +223,7 @@ def test_correction_in_summary_updates_and_summarizes_again(client: TestClient) 
 
 def test_cancel_during_slot_filling(client: TestClient) -> None:
     sid = new_session(client)
-    send(client, sid, "물이 계속 새요")
+    begin(client, sid, "물이 계속 새요")
     res = send(client, sid, "취소").json()
     assert res["report_cancelled"] is True and "취소" in res["message"]
     assert res["follow_up_question"] == res["message"]
@@ -228,7 +237,7 @@ def test_cancel_during_slot_filling(client: TestClient) -> None:
 def test_cancel_button_at_summary_creates_nothing(client: TestClient) -> None:
     sid = new_session(client)
     before = report_count()
-    send(client, sid, "혜인관 2층 화장실 물이 계속 새요")
+    begin(client, sid, "혜인관 2층 화장실 물이 계속 새요")
     res = send(client, sid, "취소", action="cancel_report").json()
     assert res["report_cancelled"] is True
     assert report_count() == before
@@ -237,19 +246,19 @@ def test_cancel_button_at_summary_creates_nothing(client: TestClient) -> None:
 def test_switch_to_inquiry_ends_report_flow(client: TestClient) -> None:
     sid = new_session(client)
     before = report_count()
-    assert send(client, sid, "물이 계속 새요").json()["intent"] == "report"
+    assert begin(client, sid, "물이 계속 새요")["intent"] == "report"
     res = send(client, sid, "안내만 받을래요", action="switch_to_inquiry")
     assert res.headers["content-type"].startswith("text/event-stream")
     assert sse_text(res)
     # 신고 흐름이 끝났으므로 다음 신고 문장은 새로 시작 (이전 되묻기에 대한 답으로 안 먹힘)
-    nxt = send(client, sid, "혜인관 2층 화장실 물이 계속 새요").json()
+    nxt = begin(client, sid, "혜인관 2층 화장실 물이 계속 새요")
     assert nxt["confirm_required"] is True
     assert report_count() == before
 
 
 def test_switch_to_inquiry_by_text_during_flow(client: TestClient) -> None:
     sid = new_session(client)
-    send(client, sid, "물이 계속 새요")
+    begin(client, sid, "물이 계속 새요")
     res = send(client, sid, "안내만 받을래요")
     assert res.headers["content-type"].startswith("text/event-stream")
 
@@ -257,11 +266,11 @@ def test_switch_to_inquiry_by_text_during_flow(client: TestClient) -> None:
 # ── 상황(description)에 위치 답변·질문이 섞이지 않음 ────────────────────────────
 def test_location_answer_is_not_added_to_description(client: TestClient) -> None:
     sid = new_session(client)
-    send(client, sid, "강의실 와이파이가 안 터져요")
+    begin(client, sid, "강의실 와이파이가 안 터져요")
     second = send(client, sid, "혜인관 3층이요").json()
     assert second["confirm_required"] is True
     assert second["slots_filled"]["description"] == "강의실 와이파이가 안 터져요"
-    assert "상황: 강의실 와이파이가 안 터져요\n" in second["summary"]  # "혜인관 3층이요"가 안 붙음
+    assert "'강의실 와이파이가 안 터져요'" in second["summary"]  # "혜인관 3층이요"가 안 붙음
     done = send(client, sid, "접수").json()
     report = get_report(done["report"]["display_no"])
     assert report.description == "강의실 와이파이가 안 터져요"
@@ -270,8 +279,8 @@ def test_location_answer_is_not_added_to_description(client: TestClient) -> None
 
 def test_question_reply_to_location_ask_is_ignored(client: TestClient) -> None:
     sid = new_session(client)
-    first = send(client, sid, "3층 정수기가 고장났어요").json()
-    assert first["follow_up_question"].startswith("신고 접수를 도와드릴게요. 어디에서")
+    first = begin(client, sid, "3층 정수기가 고장났어요")
+    assert first["follow_up_question"].startswith("필요한 정보를 물어볼게요. 어디에서")
     second = send(client, sid, "3동이 우리학교에 있어?").json()
     # 질문은 위치로도 상황으로도 쓰지 않음 (없는 건물 "3동"이 채워지면 안 됨)
     assert second["confirm_required"] is True
@@ -283,7 +292,7 @@ def test_question_reply_to_location_ask_is_ignored(client: TestClient) -> None:
 
 def test_unknown_building_is_not_accepted_as_building(client: TestClient) -> None:
     sid = new_session(client)
-    first = send(client, sid, "3동 2층 화장실 물이 계속 새요").json()
+    first = begin(client, sid, "3동 2층 화장실 물이 계속 새요")
     # 우리 학교에 없는 "3동"은 건물로 받지 않고, 공식 목록을 보여주며 되물음
     assert "confirm_required" not in first
     assert "'3동'은(는) 학교 건물 목록에 없어요" in first["follow_up_question"]
@@ -300,16 +309,16 @@ def test_unknown_building_is_not_accepted_as_building(client: TestClient) -> Non
 
 def test_unknown_building_still_unknown_after_one_ask_is_flagged(client: TestClient) -> None:
     sid = new_session(client)
-    send(client, sid, "공학관 301호 프로젝터가 안 켜져요")  # 공학관은 학교에 없음 → 되묻기
+    begin(client, sid, "공학관 301호 프로젝터가 안 켜져요")  # 공학관은 학교에 없음 → 되묻기
     second = send(client, sid, "모르겠어요").json()
     assert second["confirm_required"] is True  # 되묻기는 1번뿐
     assert second["slots_filled"]["building"] is None  # 건물로는 절대 안 채움
-    assert "학교 건물 목록에 없는 이름" in second["summary"]
+    assert "학교 건물 목록에 없어서" in second["summary"]
 
 
 def test_location_answer_with_problem_text_is_kept_in_description(client: TestClient) -> None:
     sid = new_session(client)
-    send(client, sid, "물이 계속 새요")
+    begin(client, sid, "물이 계속 새요")
     second = send(client, sid, "혜인관 3층 화장실이요, 변기가 막혔어요").json()
     assert second["confirm_required"] is True
     assert "변기가 막혔어요" in second["slots_filled"]["description"]
@@ -318,7 +327,7 @@ def test_location_answer_with_problem_text_is_kept_in_description(client: TestCl
 # ── 접수 직후의 인사 (명세 4-1 보완 ②) ────────────────────────────────────────
 def test_thanks_after_report_is_not_a_new_report(client: TestClient) -> None:
     sid = new_session(client)
-    send(client, sid, "혜인관 2층 화장실 물이 계속 새요")
+    begin(client, sid, "혜인관 2층 화장실 물이 계속 새요")
     assert send(client, sid, "접수").json()["report_created"] is True
     before = report_count()
     res = send(client, sid, "고마워요")  # FAKE 분류기에 없는 문장 — 분류기를 부르면 KeyError
@@ -333,7 +342,7 @@ def test_thanks_after_report_is_not_a_new_report(client: TestClient) -> None:
 # ── 위치 처리 규칙 (명세 4-1) ─────────────────────────────────────────────────
 def test_eunju_asks_which_building_with_choices(client: TestClient) -> None:
     sid = new_session(client)
-    first = send(client, sid, "은주관 3층 화장실 물이 새요").json()
+    first = begin(client, sid, "은주관 3층 화장실 물이 새요")
     assert "은주1관인가요, 은주2관인가요?" in first["follow_up_question"]
     assert first["choices"] == ["은주1관", "은주2관", "잘 모르겠어요"]
     assert first["slots_filled"]["building"] == "은주관(1·2관 미확정)"
@@ -347,14 +356,14 @@ def test_eunju_asks_which_building_with_choices(client: TestClient) -> None:
 
 def test_eunju_button_answer_one_gwan(client: TestClient) -> None:
     sid = new_session(client)
-    send(client, sid, "은주관 3층 화장실 물이 새요")
+    begin(client, sid, "은주관 3층 화장실 물이 새요")
     second = send(client, sid, "2관").json()
     assert second["slots_filled"]["building"] == "은주2관"
 
 
 def test_eunju_unsure_keeps_raw_location(client: TestClient) -> None:
     sid = new_session(client)
-    send(client, sid, "은주관 3층 화장실 물이 새요")
+    begin(client, sid, "은주관 3층 화장실 물이 새요")
     second = send(client, sid, "잘 모르겠어요").json()
     assert second["confirm_required"] is True  # 위치 되묻기는 1번뿐 — 더 묻지 않음
     done = send(client, sid, "접수").json()
@@ -365,7 +374,7 @@ def test_eunju_unsure_keeps_raw_location(client: TestClient) -> None:
 
 def test_fourth_floor_in_building_without_one_asks_once(client: TestClient) -> None:
     sid = new_session(client)
-    first = send(client, sid, "대일관 4층 복도 조명이 깜빡거려요").json()
+    first = begin(client, sid, "대일관 4층 복도 조명이 깜빡거려요")
     assert "4층 표기가 없어요" in first["follow_up_question"]
     second = send(client, sid, "아 3층이에요").json()
     assert second["confirm_required"] is True
@@ -374,14 +383,14 @@ def test_fourth_floor_in_building_without_one_asks_once(client: TestClient) -> N
 
 def test_fourth_floor_confirmed_is_kept(client: TestClient) -> None:
     sid = new_session(client)
-    send(client, sid, "대일관 4층 복도 조명이 깜빡거려요")
+    begin(client, sid, "대일관 4층 복도 조명이 깜빡거려요")
     second = send(client, sid, "네 4층 맞아요").json()
     assert second["confirm_required"] is True and second["slots_filled"]["floor"] == "4"
 
 
 def test_generic_place_name_only_asks_for_building(client: TestClient) -> None:
     sid = new_session(client)
-    first = send(client, sid, "강의실 와이파이가 안 터져요").json()
+    first = begin(client, sid, "강의실 와이파이가 안 터져요")
     assert "어느 건물 몇 층 강의실인가요?" in first["follow_up_question"]
     second = send(client, sid, "혜인관 3층이요").json()
     assert second["confirm_required"] is True
@@ -390,8 +399,8 @@ def test_generic_place_name_only_asks_for_building(client: TestClient) -> None:
 
 def test_floor_only_asks_location_once_then_summarizes(client: TestClient) -> None:
     sid = new_session(client)
-    first = send(client, sid, "3층 정수기가 고장났어요").json()
-    assert first["follow_up_question"].startswith("신고 접수를 도와드릴게요. 어디에서")
+    first = begin(client, sid, "3층 정수기가 고장났어요")
+    assert first["follow_up_question"].startswith("필요한 정보를 물어볼게요. 어디에서")
     second = send(client, sid, "모르겠어요").json()
     assert second["confirm_required"] is True  # 같은 질문은 1번만
     assert second["slots_filled"]["building"] is None
@@ -399,7 +408,7 @@ def test_floor_only_asks_location_once_then_summarizes(client: TestClient) -> No
 
 def test_facility_name_fills_building(client: TestClient) -> None:
     sid = new_session(client)
-    body = send(client, sid, "스포렉스 샤워실 온수가 안 나와요").json()
+    body = begin(client, sid, "스포렉스 샤워실 온수가 안 나와요")
     assert body["confirm_required"] is True  # 특정 시설 이름은 위치로 인정 — 건물을 안 묻고
     assert body["slots_filled"]["building"] == "유담관"
     assert body["slots_filled"]["floor"] == "3"
@@ -410,7 +419,7 @@ def test_facility_name_fills_building(client: TestClient) -> None:
 
 def test_building_table_match_in_chat(client: TestClient) -> None:
     sid = new_session(client)
-    body = send(client, sid, "혜인관 7층 화장실 물이 새요").json()
+    body = begin(client, sid, "혜인관 7층 화장실 물이 새요")
     assert body["confirm_required"] is True and body["slots_filled"]["building"] == "혜인관"
     done = send(client, sid, "접수").json()
     report = get_report(done["report"]["display_no"])
@@ -424,7 +433,7 @@ def test_unclear_then_report_keeps_original_sentence(client: TestClient) -> None
         "intent": "unclear",
         "clarifying_question": "이걸 신고로 접수해드릴까요, 안내가 필요하신 건가요?",
     }
-    res = send(client, sid, "신고해 주세요").json()
+    res = begin(client, sid, "신고해 주세요")
     # 원래 문장(계단이 미끄러운데)이 신고 내용에 들어 있어 상황은 안 묻고, 계단만으론 건물을 모름 → 위치 되묻기
     assert "어느 건물 몇 층 계단인가요?" in res["follow_up_question"]
     res = send(client, sid, "혜인관 2층이요").json()
@@ -472,19 +481,18 @@ def reset(client: TestClient, sid: str):  # type: ignore[no-untyped-def]
 
 def test_reset_ends_in_progress_flow_so_old_input_does_not_leak(client: TestClient) -> None:
     sid = new_session(client)
-    send(client, sid, "물이 계속 새요")  # 위치를 되묻는 중에 페이지를 새로 엶
+    begin(client, sid, "물이 계속 새요")  # 위치를 되묻는 중에 페이지를 새로 엶
     assert reset(client, sid).status_code == 204
-    body = send(client, sid, "혜인관 2층 화장실 물이 계속 새요").json()
+    body = begin(client, sid, "혜인관 2층 화장실 물이 계속 새요")
     assert body["confirm_required"] is True
     # 예전 입력("물이 계속 새요")이 상황에 섞이지 않음
     assert body["slots_filled"]["description"] == "혜인관 2층 화장실 물이 계속 새요"
-    assert body["summary"].startswith("신고 접수를 도와드릴게요.")  # 새 신고로 시작
 
 
 def test_reset_ends_flow_at_summary_stage(client: TestClient) -> None:
     sid = new_session(client)
     before = report_count()
-    assert send(client, sid, "혜인관 2층 화장실 물이 계속 새요").json()["confirm_required"] is True
+    assert begin(client, sid, "혜인관 2층 화장실 물이 계속 새요")["confirm_required"] is True
     assert reset(client, sid).status_code == 204
     # 요약이 떠 있던 상태였어도 새 입력은 정정이 아니라 새 신고 — 접수는 만들어지지 않음
     body = send(client, sid, "휴학 신청 어떻게 해요?")
@@ -513,3 +521,83 @@ def test_locations_endpoint(client: TestClient) -> None:
     assert buildings[-1]["custom"] is True  # 단계마다 맨 끝은 "목록에 없음 (직접 입력)"
     first_floor = buildings[0]["floors"][0]
     assert first_floor["places"][-1]["custom"] is True
+
+
+# ── 대화형 흐름: 접수 제안 → 응 → 정보 묻기 → 문장 확인 (명세 4-1) ─────────────────
+def test_offer_comes_first_and_is_conversational(client: TestClient) -> None:
+    sid = new_session(client)
+    before = report_count()
+    offer = send(client, sid, "3층 정수기가 고장났어요").json()
+    assert offer["intent"] == "report" and "confirm_required" not in offer
+    assert "접수를 도와드릴까요?" in offer["follow_up_question"]
+    assert "3층 정수기가 고장났어요" in offer["follow_up_question"]
+    assert "위치:" not in offer["follow_up_question"] and "\n" not in offer["follow_up_question"]
+    assert offer["choices"] == ["네, 접수해 주세요", "아니요, 안내만 받을게요"]
+    # "응" → 필요한 정보를 물어봄 (위치 되묻기)
+    ask = send(client, sid, "응").json()
+    assert ask["follow_up_question"].startswith("필요한 정보를 물어볼게요.")
+    assert report_count() == before
+
+
+def test_offer_decline_ends_flow(client: TestClient) -> None:
+    sid = new_session(client)
+    before = report_count()
+    send(client, sid, "3층 정수기가 고장났어요")
+    res = send(client, sid, "아니요").json()
+    assert res["report_cancelled"] is True and "접수는 하지 않을게요" in res["message"]
+    assert report_count() == before
+    assert send(client, sid, "휴학 신청 어떻게 해요?").headers["content-type"].startswith(
+        "text/event-stream"
+    )
+
+
+def test_offer_chip_inquiry_goes_to_inquiry(client: TestClient) -> None:
+    sid = new_session(client)
+    send(client, sid, "3층 정수기가 고장났어요")
+    res = send(client, sid, "아니요, 안내만 받을게요")
+    assert res.headers["content-type"].startswith("text/event-stream")
+
+
+def test_offer_reply_with_info_skips_yes_and_continues(client: TestClient) -> None:
+    """"응" 대신 바로 위치를 말해도 수락으로 보고 이어감."""
+    sid = new_session(client)
+    send(client, sid, "3층 정수기가 고장났어요")
+    body = send(client, sid, "혜인관이에요").json()
+    assert body["confirm_required"] is True
+    assert body["slots_filled"]["building"] == "혜인관" and body["slots_filled"]["floor"] == "3"
+
+
+def test_edit_chip_asks_what_to_fix_then_summarizes_again(client: TestClient) -> None:
+    sid = new_session(client)
+    assert begin(client, sid, "혜인관 2층 화장실 물이 계속 새요")["confirm_required"] is True
+    ask = send(client, sid, "내용을 고칠래요").json()
+    assert "어느 부분을 고칠까요?" in ask["follow_up_question"] and "confirm_required" not in ask
+    again = send(client, sid, "3층이에요").json()
+    assert again["confirm_required"] is True and again["slots_filled"]["floor"] == "3"
+    done = send(client, sid, "네, 접수해 주세요").json()
+    assert get_report(done["report"]["display_no"]).floor == "3"
+
+
+def test_rephrased_messages_keep_flow_state(client: TestClient) -> None:
+    """Gemini가 말투를 완전히 바꿔도 단계(kind)는 저장된 값으로 알아봄."""
+    def rewrite(kind: str, base: str, must: list[str], history: list[HistoryItem]) -> str:
+        return f"[{kind}] " + " ".join(must) if must else f"[{kind}] 음, 조금 더 말씀해 주세요"
+
+    app.dependency_overrides[get_phraser] = lambda: rewrite
+    try:
+        sid = new_session(client)
+        before = report_count()
+        assert send(client, sid, "혜인관 2층 화장실 물이 계속 새요").json()["follow_up_question"].startswith("[offer]")
+        summary = send(client, sid, "응").json()
+        assert summary["confirm_required"] is True and summary["summary"].startswith("[summary]")
+        assert send(client, sid, "접수").json()["report_created"] is True
+        assert report_count() == before + 1
+    finally:
+        app.dependency_overrides.pop(get_phraser, None)
+
+
+def test_phraser_failure_falls_back_to_fixed_text(client: TestClient) -> None:
+    """ai 서비스가 없거나 실패하면(테스트 환경은 AI_SERVICE_URL 없음) 고정 문구로 계속 진행."""
+    sid = new_session(client)
+    offer = send(client, sid, "3층 정수기가 고장났어요").json()
+    assert offer["follow_up_question"].endswith("접수를 도와드릴까요?")
