@@ -42,6 +42,9 @@ ASK_UNKNOWN_BUILDING = (
 EUNJU_CHOICES = ["은주1관", "은주2관", "잘 모르겠어요"]
 ASK_EUNJU = "은주1관인가요, 은주2관인가요? 잘 모르시면 '잘 모르겠어요'라고 해주세요."
 ASK_FLOOR4 = "{building}에는 4층 표기가 없어요. 직접 세어 보신 층이 맞나요? 아니라면 실제 층을 알려주세요."
+# 건물까지만 알고 층·호수를 모를 때 한 번 더 (위치 되묻기와 별개로 1번 — 명세 4-1 개정)
+ASK_FLOOR = "{building}의 몇 층, 몇 호인가요? 모르시면 '잘 모르겠어요'라고 해주세요."
+FLOOR_CHOICES = ["1층", "2층", "3층", "잘 모르겠어요"]
 ASK_PROBLEM = "어떤 문제인지 조금 더 자세히 알려주시겠어요? (예: 물이 새요, 불이 안 켜져요)"
 CANCELLED = "신고 접수를 취소했어요. 다른 도움이 필요하면 편하게 말씀해 주세요."
 CANCEL_WORDS = ("취소", "그만", "안 할래", "안할래")
@@ -56,8 +59,8 @@ SUMMARY_CHOICES = ["네, 접수해 주세요", "내용을 고칠래요", "취소
 LOCATION_CHOICES = ["은주1관", "은주2관", "혜인관", "유담관", "상승관", "잘 모르겠어요"]
 FLOOR4_CHOICES = ["네, 맞아요"]
 # 저장하는 챗봇 메시지 종류 — Gemini가 말투를 바꿔도 종류는 chat_messages.debug_payload["kind"]로 알 수 있음
-KIND_OFFER, KIND_LOCATION, KIND_PROBLEM, KIND_SUMMARY, KIND_EDIT = (
-    "offer", "location", "problem", "summary", "edit"
+KIND_OFFER, KIND_LOCATION, KIND_PROBLEM, KIND_SUMMARY, KIND_EDIT, KIND_FLOOR = (
+    "offer", "location", "problem", "summary", "edit", "floor"
 )
 DONE_PREFIX = "신고가 접수됐어요"
 RESET_NOTE = "(새 대화를 시작했어요)"  # 페이지를 새로 열었을 때 진행 중이던 신고 흐름을 끝내는 표식
@@ -71,7 +74,7 @@ LOCATION_MARKERS = (
     "에는 4층 표기가 없어요",
     "학교 건물 목록에 없어요",
 )
-ASK_LOC, ASK_PROB = "location", "problem"  # asked 집합에 들어가는 키
+ASK_LOC, ASK_PROB, ASK_FLR = "location", "problem", "floor"  # asked 집합에 들어가는 키
 
 # ── 카테고리 키워드 (카테고리 이름은 categories 테이블 시드값과 같아야 함) ──────────
 # 위에서부터 먼저 걸리는 카테고리로 정한다 → 구체적인 것(안전·전기·IT)을 일반적인 것(시설·설비)보다 위에.
@@ -415,7 +418,7 @@ def _has_problem_text(text: str) -> bool:
 
 def _apply_reply(extract: list[str], desc: list[str], prev_kind: str | None, text: str) -> None:
     """되묻기·요약 뒤에 온 사용자 메시지 하나를 추출용/상황용 목록에 반영."""
-    if prev_kind in (KIND_LOCATION, KIND_PROBLEM, KIND_OFFER) and is_question_like(text):
+    if prev_kind in (KIND_LOCATION, KIND_PROBLEM, KIND_OFFER, KIND_FLOOR) and is_question_like(text):
         return  # 되묻기와 상관없는 질문 — 위치로도 상황으로도 쓰지 않음
     extract.append(text)
     if prev_kind == KIND_PROBLEM or prev_kind is None or _has_problem_text(text):
@@ -435,6 +438,8 @@ def _message_kind(msg: MessageLike) -> str | None:
         return KIND_EDIT
     if any(m in content for m in LOCATION_MARKERS):
         return KIND_LOCATION
+    if "몇 층, 몇 호인가요?" in content:
+        return KIND_FLOOR
     if ASK_PROBLEM in content:
         return KIND_PROBLEM
     return None
@@ -460,6 +465,8 @@ def collect_draft(history: Sequence[MessageLike]) -> Draft:
                 draft.asked.add(ASK_LOC)
             if prev_kind == KIND_PROBLEM:
                 draft.asked.add(ASK_PROB)
+            if prev_kind == KIND_FLOOR:
+                draft.asked.add(ASK_FLR)
     last_is_report_reply = bool(history) and (
         history[-1].intent == ChatIntent.REPORT and history[-1].role == ChatRole.ASSISTANT
     )
@@ -575,6 +582,17 @@ def next_question(slots: ReportSlots, asked: set[str]) -> Question | None:
                     list(LOCATION_CHOICES),
                 )
             return Question(ASK_LOCATION, ASK_LOC, list(LOCATION_CHOICES))
+    # 건물은 아는데 층·호수를 전혀 모르면 한 번 더 (호수·특정 시설이 있으면 위치가 특정돼 생략)
+    if (
+        slots.building
+        and not slots.floor
+        and not slots.detail_specific
+        and ASK_FLR not in asked
+    ):
+        return Question(
+            ASK_FLOOR.format(building=slots.building), ASK_FLR, list(FLOOR_CHOICES),
+            [slots.building],
+        )
     if not slots.has_problem and ASK_PROB not in asked:
         return Question(ASK_PROBLEM, ASK_PROB)
     return None

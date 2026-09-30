@@ -601,3 +601,25 @@ def test_phraser_failure_falls_back_to_fixed_text(client: TestClient) -> None:
     sid = new_session(client)
     offer = send(client, sid, "3층 정수기가 고장났어요").json()
     assert offer["follow_up_question"].endswith("접수를 도와드릴까요?")
+
+
+def test_building_only_answer_asks_floor_and_room_once(client: TestClient) -> None:
+    """"북악관"만 답하면 바로 접수 확인으로 가지 않고 층·호수를 한 번 더 물음."""
+    sid = new_session(client)
+    ask = begin(client, sid, "강의실 와이파이가 안 터져요")
+    assert "어느 건물 몇 층 강의실인가요?" in ask["follow_up_question"]
+    floor_ask = send(client, sid, "북악관").json()
+    assert "confirm_required" not in floor_ask
+    assert "북악관의 몇 층, 몇 호인가요?" in floor_ask["follow_up_question"]
+    assert floor_ask["choices"][-1] == "잘 모르겠어요"
+    summary = send(client, sid, "3층 301호요").json()
+    assert summary["confirm_required"] is True
+    assert summary["slots_filled"]["floor"] == "3"
+
+
+def test_unsure_floor_answer_does_not_ask_again(client: TestClient) -> None:
+    sid = new_session(client)
+    begin(client, sid, "강의실 와이파이가 안 터져요")
+    send(client, sid, "북악관")
+    summary = send(client, sid, "잘 모르겠어요").json()
+    assert summary["confirm_required"] is True  # 층 질문도 1번뿐

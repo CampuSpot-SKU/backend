@@ -245,7 +245,12 @@ def test_next_question_order_and_asks_only_once() -> None:
     q2 = next_question(empty, {ASK_LOC})
     assert q2 is not None and q2.text == ASK_PROBLEM and q2.key == ASK_PROB
     assert next_question(empty, {ASK_LOC, ASK_PROB}) is None  # 더 안 묻고 요약으로
-    assert next_question(extract_slots("혜인관 화장실 물이 새요"), set()) is None
+    assert next_question(extract_slots("혜인관 2층 화장실 물이 새요"), set()) is None
+    # 건물까지만 알면 층·호수를 한 번 더 물음 (이미 물었으면 더 안 물음)
+    q = next_question(extract_slots("혜인관 화장실 물이 새요"), set())
+    assert q is not None and q.key == "floor" and "혜인관의 몇 층, 몇 호인가요?" in q.text
+    assert next_question(extract_slots("혜인관 화장실 물이 새요"), {"floor"}) is None
+    assert next_question(extract_slots("혜인관 301호 프로젝터가 안 켜져요"), set()) is None  # 호수가 있음
 
 
 def test_location_question_kinds_share_one_ask() -> None:
