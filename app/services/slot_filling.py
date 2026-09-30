@@ -41,6 +41,7 @@ ASK_UNKNOWN_BUILDING = (
 )
 EUNJU_CHOICES = ["은주1관", "은주2관", "잘 모르겠어요"]
 ASK_EUNJU = "은주1관인가요, 은주2관인가요? 잘 모르시면 '잘 모르겠어요'라고 해주세요."
+ASK_BUILDING_ONLY = "어느 건물인가요? (예: 혜인관)"
 ASK_FLOOR4 = "{building}에는 4층 표기가 없어요. 직접 세어 보신 층이 맞나요? 아니라면 실제 층을 알려주세요."
 # 건물까지만 알고 층·호수를 모를 때 한 번 더 (위치 되묻기와 별개로 1번 — 명세 4-1 개정)
 ASK_FLOOR = "{building}의 몇 층, 몇 호인가요? 모르시면 '잘 모르겠어요'라고 해주세요."
@@ -73,6 +74,8 @@ LOCATION_MARKERS = (
     "은주1관인가요, 은주2관인가요?",
     "에는 4층 표기가 없어요",
     "학교 건물 목록에 없어요",
+    "어느 건물의 ",
+    ASK_BUILDING_ONLY,
 )
 ASK_LOC, ASK_PROB, ASK_FLR = "location", "problem", "floor"  # asked 집합에 들어가는 키
 
@@ -462,11 +465,11 @@ def collect_draft(history: Sequence[MessageLike]) -> Draft:
         else:
             prev_kind = _message_kind(msg)
             if prev_kind == KIND_LOCATION:
-                draft.asked.add(ASK_LOC)
+                add_ask(draft.asked, ASK_LOC)
             if prev_kind == KIND_PROBLEM:
                 draft.asked.add(ASK_PROB)
             if prev_kind == KIND_FLOOR:
-                draft.asked.add(ASK_FLR)
+                add_ask(draft.asked, ASK_FLR)
     last_is_report_reply = bool(history) and (
         history[-1].intent == ChatIntent.REPORT and history[-1].role == ChatRole.ASSISTANT
     )
@@ -556,12 +559,28 @@ class Question:
     must_include: list[str] = field(default_factory=list)  # 말투를 바꿔도 남아 있어야 하는 표현
 
 
-def next_question(slots: ReportSlots, asked: set[str]) -> Question | None:
-    """빠진 필수 슬롯에 대한 질문. None이면 요약 단계로 가도 됨 (같은 종류 질문은 한 번만).
+MAX_LOC_ASKS = 3  # 건물을 끝내 못 알아들을 때 같은 걸 무한히 묻지 않게 (안전장치)
+MAX_FLOOR_ASKS = 2
 
-    위치 되묻기(은주관 / 4층 확인 / 위치 없음·일반 장소 이름만)는 어떤 종류든 합쳐서 1번.
+
+def _count_asks(asked: set[str], key: str) -> int:
+    """asked에 "location", "location#2", "location#3"처럼 쌓인 같은 종류 질문 횟수."""
+    return sum(1 for a in asked if a == key or a.startswith(key + "#"))
+
+
+def add_ask(asked: set[str], key: str) -> None:
+    n = _count_asks(asked, key)
+    asked.add(key if n == 0 else f"{key}#{n + 1}")
+
+
+def next_question(slots: ReportSlots, asked: set[str], unsure: bool = False) -> Question | None:
+    """빠진 필수 슬롯에 대한 질문. None이면 요약 단계로 가도 됨.
+
+    빠진 게 있으면 물어본다: 건물을 못 알아들었으면 다시 묻고(최대 MAX_LOC_ASKS번), 학생이 마지막 답에서
+    "모르겠어요"라고 하면(unsure) 그 항목은 더 묻지 않는다. 4층 확인은 1번만.
     """
-    if ASK_LOC not in asked:
+    loc_asks = _count_asks(asked, ASK_LOC)
+    if loc_asks < MAX_LOC_ASKS and not (unsure and loc_asks > 0):
         if slots.ambiguous_building:
             return Question(ASK_EUNJU, ASK_LOC, list(EUNJU_CHOICES), ["은주1관", "은주2관"])
         if slots.unknown_place and not slots.building:
@@ -570,24 +589,32 @@ def next_question(slots: ReportSlots, asked: set[str]) -> Question | None:
                 ASK_UNKNOWN_BUILDING.format(name=slots.unknown_place), ASK_LOC,
                 [*names[:5], "잘 모르겠어요"], names,
             )
-        if slots.floor_check and slots.building:
+        if slots.floor_check and slots.building and loc_asks == 0:
             return Question(
                 ASK_FLOOR4.format(building=slots.building), ASK_LOC, list(FLOOR4_CHOICES),
                 [slots.building],
             )
         if not slots.has_location:
+            if loc_asks > 0:  # 이미 물었는데 건물을 못 알아들음 → 알아낸 것(층·장소)을 짚으며 건물만 다시
+                where = " ".join(
+                    x for x in (f"{slots.floor}층" if slots.floor else "", slots.detail or "") if x
+                )
+                text = f"어느 건물의 {where}인가요?" if where else ASK_BUILDING_ONLY
+                return Question(text, ASK_LOC, list(LOCATION_CHOICES))
             if slots.detail:  # 강의실·복도처럼 일반 장소 이름만 → 건물을 물음
                 return Question(
                     ASK_LOCATION_GENERIC.format(detail=slots.detail), ASK_LOC,
                     list(LOCATION_CHOICES),
                 )
             return Question(ASK_LOCATION, ASK_LOC, list(LOCATION_CHOICES))
-    # 건물은 아는데 층·호수를 전혀 모르면 한 번 더 (호수·특정 시설이 있으면 위치가 특정돼 생략)
+    # 건물은 아는데 층·호수를 전혀 모르면 묻기 (호수·특정 시설이 있으면 위치가 특정돼 생략)
+    floor_asks = _count_asks(asked, ASK_FLR)
     if (
         slots.building
         and not slots.floor
         and not slots.detail_specific
-        and ASK_FLR not in asked
+        and floor_asks < MAX_FLOOR_ASKS
+        and not (unsure and floor_asks > 0)
     ):
         return Question(
             ASK_FLOOR.format(building=slots.building), ASK_FLR, list(FLOOR_CHOICES),

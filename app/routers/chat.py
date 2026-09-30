@@ -67,6 +67,7 @@ from app.services.slot_filling import (
     RESET_NOTE,
     SUMMARY_CHOICES,
     THANKS_REPLY,
+    UNKNOWN_WORDS,
     Draft,
     ReportSlots,
     apply_form,
@@ -402,7 +403,9 @@ def _report_step(
             slots = apply_form(slots, form.building, form.floor, form.detail, buildings, judged)
         return _create(db, session_id, user_msg, slots, form_desc or described or joined)
 
-    question = next_question(slots, asked)
+    # 학생이 마지막 답에서 "모르겠어요"라고 했으면 그 항목은 다시 묻지 않음
+    unsure = bool(texts) and any(w in texts[-1] for w in UNKNOWN_WORDS)
+    question = next_question(slots, asked, unsure)
     if question is not None:
         base = (INTRO if intro else "") + question.text
         content = phrase(question.key, base, question.must_include)

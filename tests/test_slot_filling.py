@@ -86,8 +86,10 @@ def test_unknown_building_name_is_not_a_building() -> None:
         assert not slots.has_location  # 호수·열람실이 있어도 어느 건물인지 모름
         q = next_question(slots, set())
         assert q is not None and f"'{name}'은(는) 학교 건물 목록에 없어요" in q.text
-    # 되묻기는 1번 — 한 번 물은 뒤엔 그대로 요약으로
-    assert next_question(extract_slots("7동 엘리베이터 고장났어요"), {ASK_LOC}) is None
+    # 한 번 물었는데도 모르면 다시 묻고, "모르겠어요"라고 하면(unsure) 그대로 요약으로
+    again = next_question(extract_slots("7동 엘리베이터 고장났어요"), {ASK_LOC})
+    assert again is not None and again.key == ASK_LOC
+    assert next_question(extract_slots("7동 엘리베이터 고장났어요"), {ASK_LOC}, unsure=True) is None
 
 
 def test_official_buildings_are_recognized_even_without_table() -> None:
@@ -242,25 +244,32 @@ def test_next_question_order_and_asks_only_once() -> None:
     empty = extract_slots("저기요")
     q1 = next_question(empty, set())
     assert q1 is not None and q1.text == ASK_LOCATION and q1.key == ASK_LOC
-    q2 = next_question(empty, {ASK_LOC})
+    q_again = next_question(empty, {ASK_LOC})  # 못 알아들었으면 건물을 다시 물음
+    assert q_again is not None and q_again.key == ASK_LOC
+    q2 = next_question(empty, {ASK_LOC}, unsure=True)  # "모르겠어요"면 다음 항목으로
     assert q2 is not None and q2.text == ASK_PROBLEM and q2.key == ASK_PROB
-    assert next_question(empty, {ASK_LOC, ASK_PROB}) is None  # 더 안 묻고 요약으로
+    assert next_question(empty, {ASK_LOC, ASK_PROB}, unsure=True) is None  # 더 안 묻고 요약으로
+    # 그래도 무한히 묻지는 않음 (위치 질문 최대 3번)
+    assert next_question(empty, {ASK_LOC, "location#2", "location#3", ASK_PROB}) is None
     assert next_question(extract_slots("혜인관 2층 화장실 물이 새요"), set()) is None
     # 건물까지만 알면 층·호수를 한 번 더 물음 (이미 물었으면 더 안 물음)
     q = next_question(extract_slots("혜인관 화장실 물이 새요"), set())
     assert q is not None and q.key == "floor" and "혜인관의 몇 층, 몇 호인가요?" in q.text
-    assert next_question(extract_slots("혜인관 화장실 물이 새요"), {"floor"}) is None
+    assert next_question(extract_slots("혜인관 화장실 물이 새요"), {"floor"}, unsure=True) is None
+    assert next_question(extract_slots("혜인관 화장실 물이 새요"), {"floor", "floor#2"}) is None
     assert next_question(extract_slots("혜인관 301호 프로젝터가 안 켜져요"), set()) is None  # 호수가 있음
 
 
 def test_location_question_kinds_share_one_ask() -> None:
     # 은주관을 되묻고 난 뒤엔 4층 확인·일반 장소 확인 등 다른 위치 질문을 또 하지 않음
     slots = extract_slots("은주관 3층 화장실 물이 새요")
-    assert next_question(slots, {ASK_LOC}) is None
+    assert next_question(slots, {ASK_LOC}, unsure=True) is None
     slots = extract_slots("강의실 와이파이가 안 터져요")
     q = next_question(slots, set())
     assert q is not None and q.text == "어느 건물 몇 층 강의실인가요? (예: 은주1관 3층 강의실)"
-    assert next_question(slots, {ASK_LOC}) is None
+    again = next_question(slots, {ASK_LOC})  # 건물을 못 알아들었으면 알아낸 장소를 짚어 다시 물음
+    assert again is not None and again.text == "어느 건물의 강의실인가요?"
+    assert next_question(slots, {ASK_LOC}, unsure=True) is None
 
 
 # ── collect_draft ───────────────────────────────────────────────────────────

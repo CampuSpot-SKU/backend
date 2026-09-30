@@ -282,12 +282,35 @@ def test_question_reply_to_location_ask_is_ignored(client: TestClient) -> None:
     first = begin(client, sid, "3층 정수기가 고장났어요")
     assert first["follow_up_question"].startswith("필요한 정보를 물어볼게요. 어디에서")
     second = send(client, sid, "3동이 우리학교에 있어?").json()
-    # 질문은 위치로도 상황으로도 쓰지 않음 (없는 건물 "3동"이 채워지면 안 됨)
-    assert second["confirm_required"] is True
+    # 질문은 위치로도 상황으로도 쓰지 않음 (없는 건물 "3동"이 채워지면 안 됨) → 건물을 아직 모르니 다시 물음
+    assert "confirm_required" not in second
+    assert "어느 건물의 3층" in second["follow_up_question"]
     assert second["slots_filled"]["building"] is None
     assert second["slots_filled"]["floor"] == "3"
     assert second["slots_filled"]["description"] == "3층 정수기가 고장났어요"
-    assert "우리학교" not in second["summary"]
+    third = send(client, sid, "잘 모르겠어요").json()  # 모른다고 하면 더 묻지 않고 확인으로
+    assert third["confirm_required"] is True
+    assert "우리학교" not in third["summary"]
+
+
+def test_floor_only_answer_asks_building_again(client: TestClient) -> None:
+    """건물을 물었는데 층만 답하면, 부족한 건물을 다시 물음 ("3층"만 말하고 접수 확인으로 가면 안 됨)."""
+    sid = new_session(client)
+    begin(client, sid, "강의실 와이파이가 안 터져요")
+    again = send(client, sid, "3층").json()
+    assert "confirm_required" not in again
+    assert "어느 건물의 3층 강의실인가요?" in again["follow_up_question"]
+    summary = send(client, sid, "북악관").json()
+    assert "몇 층" not in summary["follow_up_question"]  # 층은 이미 앎
+    assert summary["confirm_required"] is True
+    assert summary["slots_filled"]["building"] == "북악관" and summary["slots_filled"]["floor"] == "3"
+
+
+def test_unsure_location_is_not_asked_forever(client: TestClient) -> None:
+    sid = new_session(client)
+    begin(client, sid, "강의실 와이파이가 안 터져요")
+    send(client, sid, "글쎄요")  # 건물을 못 알아들음 → 한 번 더
+    assert send(client, sid, "몰라요").json()["confirm_required"] is True
 
 
 def test_unknown_building_is_not_accepted_as_building(client: TestClient) -> None:
