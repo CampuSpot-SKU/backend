@@ -583,3 +583,12 @@ def test_unlisted_outdoor_place_is_asked_not_accepted() -> None:
     # 건물이 함께 있거나 학교에 있는 장소(정문)면 그대로 접수
     assert extract_slots("북악관 앞 정원 벤치가 부서졌어요").has_location
     assert extract_slots("정문 앞 광장 조명이 나갔어요").has_location
+
+
+def test_fire_expressions_are_a_problem_and_urgent() -> None:
+    # "불이 난 거 같아" — 상황을 아는 문장(안전·긴급)이어야 하고, "불이 나갔어요"(조명 꺼짐)와는 구분
+    for text in ["하늘공원에 불이 난 거 같아", "북악관 3층에 불났어요", "혜인관 앞에서 불길이 보여요"]:
+        slots = extract_slots(text)
+        assert slots.has_problem and slots.category == "안전" and slots.urgency == Level.HIGH
+    lights = extract_slots("북악관 3층 복도 불이 나갔어요")
+    assert lights.category != "안전" and lights.urgency == Level.LOW
