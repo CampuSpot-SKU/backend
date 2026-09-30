@@ -54,6 +54,7 @@ from app.services.ai_client import (
     classify_intent,
     say_text,
 )
+from app.services.smalltalk import pick_reply
 from app.services.report_service import create_report, load_buildings
 from app.services.slot_filling import (
     ASK_EDIT,
@@ -278,6 +279,15 @@ def send_message(
         "inquiry_score": result.inquiry_score,
         "safety_concern": result.safety_concern,
     }
+
+    if result.intent in ("chitchat", "off_topic"):
+        # 인사·잡담·범위 밖 — 신고도 문의도 아니므로 흐름을 만들지 않고 짧게 한 마디만 (Gemini 재호출 없음)
+        recent = [m.content for m in history if m.role == ChatRole.ASSISTANT]
+        reply_text = pick_reply(result.talk, recent)
+        user_msg.debug_payload = {"talk": result.talk}
+        _add_message(db, session_id, ChatRole.ASSISTANT, reply_text, _after(user_msg))
+        db.commit()  # intent 없이 저장 → 진행 중인 흐름이 없다는 표시 그대로
+        return StreamingResponse(_sse_once(reply_text), media_type="text/event-stream")
 
     if result.intent == "unclear":
         user_msg.intent = ChatIntent.UNCLEAR

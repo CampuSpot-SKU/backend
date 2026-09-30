@@ -26,11 +26,12 @@ class HistoryItem(BaseModel):
 class IntentResult(BaseModel):
     """ai `POST /api/v1/intent/classify` 응답."""
 
-    intent: Literal["report", "inquiry", "unclear"]
+    intent: Literal["report", "inquiry", "unclear", "chitchat", "off_topic"]
     report_score: int
     inquiry_score: int
     safety_concern: bool = False
     clarifying_question: str | None = None
+    talk: str = "none"  # chitchat·off_topic일 때: greeting/thanks/bye/smalltalk/about/off_topic
 
 
 class AiServiceError(Exception):

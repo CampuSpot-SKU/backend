@@ -44,6 +44,11 @@ FAKE: dict[str, IntentResult] = {
     "은주관 3층 화장실 물이 새요": IntentResult(intent="report", report_score=92, inquiry_score=8),
     "대일관 4층 복도 조명이 깜빡거려요": IntentResult(intent="report", report_score=90, inquiry_score=10),
     "강의실 와이파이가 안 터져요": IntentResult(intent="report", report_score=88, inquiry_score=12),
+    "안녕": IntentResult(intent="chitchat", report_score=0, inquiry_score=0, talk="greeting"),
+    "날씨가 좋네": IntentResult(intent="chitchat", report_score=0, inquiry_score=0, talk="smalltalk"),
+    "오늘 날씨 알려줘": IntentResult(intent="off_topic", report_score=0, inquiry_score=0, talk="off_topic"),
+    "햄버거 만드는 법": IntentResult(intent="off_topic", report_score=0, inquiry_score=0, talk="off_topic"),
+    "파이썬 코드 짜줘": IntentResult(intent="off_topic", report_score=0, inquiry_score=0, talk="off_topic"),
     "4층이 이상해": IntentResult(intent="report", report_score=80, inquiry_score=20),
     "4층 에어컨이 안나와요": IntentResult(intent="report", report_score=90, inquiry_score=10),
     "3층 정수기가 고장났어요": IntentResult(intent="report", report_score=90, inquiry_score=10),
@@ -796,3 +801,35 @@ def test_vague_problem_is_asked_not_accepted(client: TestClient) -> None:
     summary = send(client, sid, "조명이 안 켜져요").json()
     assert summary["confirm_required"] is True
     assert summary["slots_filled"]["category"] == "전기"
+
+
+def sse_text(resp) -> str:  # type: ignore[no-untyped-def]
+    import json as _json
+
+    out = ""
+    for line in resp.text.splitlines():
+        if line.startswith("data: "):
+            payload = _json.loads(line[6:])
+            out += payload.get("delta", "")
+    return out
+
+
+def test_greeting_gets_short_reply_without_starting_a_flow(client: TestClient) -> None:
+    sid = new_session(client)
+    resp = send(client, sid, "안녕")
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    text = sse_text(resp)
+    assert "무엇에 대해 말씀하시는" not in text and len(text) < 120
+    # 흐름이 시작되지 않았으므로 이어서 신고하면 처음부터 (제안 단계)
+    offer = send(client, sid, "3층 정수기가 고장났어요").json()
+    assert offer["choices"][0] == "네, 접수해 주세요"
+
+
+def test_off_topic_is_blocked_and_repeats_differ(client: TestClient) -> None:
+    sid = new_session(client)
+    first = sse_text(send(client, sid, "오늘 날씨 알려줘"))
+    second = sse_text(send(client, sid, "햄버거 만드는 법"))
+    third = sse_text(send(client, sid, "파이썬 코드 짜줘"))
+    assert first and second and third
+    assert len({first, second, third}) == 3  # 같은 문장 반복 금지
+    assert len(second) <= len(first) + 10 and "신고" in second  # 두 번째부터는 짧고 단호, 할 수 있는 일은 안내
