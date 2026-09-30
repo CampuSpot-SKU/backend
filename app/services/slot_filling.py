@@ -773,6 +773,61 @@ def _resolve_ambiguity(amb: Ambiguity, extract: list[str], desc: list[str], text
     return "picked" if keep else "unsure"
 
 
+# ── 신고로 보기 어려운 말 거르기 (예외처리) ──────────────────────────────────────────
+# ai가 신고로 분류해도, 문제가 없거나 말이 안 되는 내용이면 접수 흐름을 시작하지 않고 한 번 되묻는다.
+# 규칙 기반이라 확실한 경우만 거른다 (놓치는 건 괜찮고, 멀쩡한 신고를 막는 게 더 나쁨 — 같은 말을 한 번 더 하면 통과).
+NON_REPORT_KIND = "non_report"  # 이 답변이 저장될 때의 kind — 학생이 같은 말을 다시 하면 그대로 통과시킴
+NO_PROBLEM_REPLY = (
+    "말씀해 주신 내용만으로는 고치거나 조치할 문제가 보이지 않아요. "
+    "고장이나 불편한 점이 있다면 어떤 문제인지 알려주세요. (예: 정수기에서 물이 안 나와요)"
+)
+CONTRADICT_REPLY = (
+    "말씀하신 내용이 서로 맞지 않아서 헷갈려요. "
+    "실제로 어떤 문제가 있는지 다시 알려주시겠어요? (예: 에어컨에서 찬바람이 안 나와요)"
+)
+IMPLAUSIBLE_REPLY = (
+    "{equip}에서 '{thing}'이(가) 나온다는 건 제가 아는 설비와 달라서 확인하고 싶어요. "
+    "실제로 어떤 일이 있었는지 다시 설명해 주시겠어요? (예: 정수기에서 물이 안 나와요)"
+)
+# 설비가 원래 내지 않는 것 (설비 → 나올 수 없는 것들). 학교에 맞게 늘릴 수 있음
+IMPLAUSIBLE_OUTPUT: dict[str, tuple[str, ...]] = {
+    "정수기": ("커피", "콜라", "사이다", "주스", "맥주", "소주", "막걸리", "우유", "라면", "국물"),
+}
+_POSITIVE_RE = re.compile(
+    r"맛있|(?<!불)깨끗(?:해[서요]|한데)|시원(?:해요|한데)|(?<!불)편(?:해[서요]|한데)|예뻐|이뻐"
+    r"|(?<!안)(?<!안 )(?<!못)(?<!못 )좋(?:아요|네요|은데|아서)|마음에 들|최고"
+)
+_FAULT_WORDS = (
+    "고장", "새요", "샌다", "막혔", "막혀", "깨졌", "깨져", "부서", "파손", "꺼져", "꺼졌", "멈췄", "멈춰", "냄새",
+    "악취", "더러", "더럽", "쓰레기", "벌레", "곰팡이", "미끄", "위험", "끊겨", "터졌", "망가", "작동", "넘쳤",
+    "넘쳐", "불량", "이상", "추워", "추운", "더워", "더운", "뜨거", "시끄", "어두", "눈부", "흔들", "삐걱", "떨어",
+)
+_NEGATION_RE = re.compile(r"(?:지|게)\s*(?:않|못)|안\s+\S|안(?:돼|되|나|켜|열|닫|터|잠)|못\s*\S|없어요|없음|없네")
+_FAULT_GUESS_RE = re.compile(r"고장(?:난|인|이)?\s*(?:것\s*같|듯)")
+_OUTPUT_VERB = r"(?:나와|나온|나오|쏟|흘러|뿜|튀어)"
+
+
+def check_not_report(text: str) -> tuple[str, str] | None:
+    """신고로 접수하기 어려운 말이면 (종류, 안내 문구), 괜찮으면 None.
+
+    종류: no_problem(칭찬·감상뿐 — 고칠 문제가 없음) / contradiction(칭찬하면서 고장이라고도 함) /
+    implausible(설비가 낼 수 없는 것이 나온다고 함). 위험·고장 표현이 있으면 거르지 않는다.
+    """
+    for equip, things in IMPLAUSIBLE_OUTPUT.items():
+        if equip not in text:
+            continue
+        for thing in things:
+            if re.search(re.escape(thing) + r"(?!\s*(?:색|빛|같|처럼|물|냄새))[^.!?\n]{0,8}" + _OUTPUT_VERB, text):
+                return "implausible", IMPLAUSIBLE_REPLY.format(equip=equip, thing=thing)
+    if not _POSITIVE_RE.search(text):
+        return None
+    if _FAULT_GUESS_RE.search(text):
+        return "contradiction", CONTRADICT_REPLY
+    if any(w in text for w in _FAULT_WORDS) or _NEGATION_RE.search(text):
+        return None  # 좋다는 말이 섞여 있어도 실제 문제를 말하는 것 ("물은 맛있는데 온수가 안 나와요")
+    return "no_problem", NO_PROBLEM_REPLY
+
+
 # ── 대화 흐름 ────────────────────────────────────────────────────────────────
 class MessageLike(Protocol):
     """chat_messages 한 줄 중 여기서 필요한 필드 (테스트에선 간단한 객체로 대체 가능)."""

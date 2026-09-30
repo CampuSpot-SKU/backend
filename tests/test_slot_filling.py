@@ -28,6 +28,7 @@ from app.services.slot_filling import (
     apply_judgement,
     build_offer,
     build_summary,
+    check_not_report,
     collect_draft,
     extract_slots,
     find_ambiguity,
@@ -925,3 +926,42 @@ def test_nested_insisted_is_accepted_with_note() -> None:
     slots = extract_slots("\n".join(extract))
     assert slots.detail == "강의실"  # 학생이 고집하면 말한 대로 (호수를 묻는 흐름으로 이어짐)
     assert "학교 정보와 달라서" in build_summary(slots, [NESTED], affirmed=True)
+
+
+# ── 신고로 보기 어려운 말 거르기 ────────────────────────────────────────────────────────
+@pytest.mark.parametrize(
+    ("text", "kind"),
+    [
+        ("은주관 3층 정수기에서 커피가 나와요.", "implausible"),
+        ("정수기에서 콜라가 쏟아져요", "implausible"),
+        ("정수기가 너무 맛있어요. 신고해주세요.", "no_problem"),
+        ("화장실이 너무 깨끗해서 불편해요.", "no_problem"),
+        ("의자가 너무 편해서 잠이 와요.", "no_problem"),
+        ("학교가 너무 예뻐서 신고하고 싶어요.", "no_problem"),
+        ("오늘 날씨가 너무 좋은데 학교 문제로 접수해주세요.", "no_problem"),
+        ("정수기 물이 너무 맛있는데 시설 문제로 신고할게요.", "no_problem"),
+        ("에어컨이 너무 시원해요. 고장난 것 같아요.", "contradiction"),
+    ],
+)
+def test_non_report_is_filtered(text: str, kind: str) -> None:
+    result = check_not_report(text)
+    assert result is not None and result[0] == kind
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "정수기에서 물이 안 나와요",
+        "의자가 불편해서 허리가 아파요",  # "불편해서"는 "편해서"가 아님
+        "정수기 물은 맛있는데 온수 버튼이 눌리지 않아요",  # 좋은 말이 섞여도 실제 문제
+        "에어컨이 너무 시원해서 추워요",
+        "정수기에서 커피색 물이 나와요",  # 녹물 표현
+        "정수기 옆 커피머신이 고장났어요",
+        "화장실 안 좋은 냄새가 나요",
+        "화장실이 깨끗하지 않아요",
+        "엘리베이터 고장났어요 빨리 고쳐주시면 좋겠어요",
+        "혜인관 2층 정수기가 고장났어요",
+    ],
+)
+def test_real_reports_are_not_filtered(text: str) -> None:
+    assert check_not_report(text) is None

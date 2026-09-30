@@ -66,6 +66,7 @@ from app.services.slot_filling import (
     KIND_EDIT,
     KIND_OFFER,
     KIND_SUMMARY,
+    NON_REPORT_KIND,
     OFFER_CHOICES,
     RESET_NOTE,
     SUMMARY_CHOICES,
@@ -77,6 +78,7 @@ from app.services.slot_filling import (
     apply_judgement,
     build_offer,
     build_summary,
+    check_not_report,
     collect_draft,
     extract_slots,
     find_ambiguity,
@@ -324,6 +326,20 @@ def send_message(
         reply.intent = ChatIntent.INQUIRY
         db.commit()
         return StreamingResponse(_sse_once(INQUIRY_PLACEHOLDER), media_type="text/event-stream")
+
+    # 3-0) 신고로 접수하기 어려운 말 (칭찬·감상뿐이거나 말이 안 되는 내용) — 흐름을 시작하지 않고 한 번 되물음.
+    #      바로 앞 답변이 이 되묻기였는데 학생이 다시 말하면 그대로 접수 흐름으로 넘어감 (멀쩡한 신고를 막지 않음)
+    asked_before = bool(history) and (
+        history[-1].role == ChatRole.ASSISTANT
+        and (history[-1].debug_payload or {}).get("kind") == NON_REPORT_KIND
+    )
+    not_report = None if asked_before else check_not_report(text)
+    if not_report is not None:
+        reason, reply_text = not_report
+        user_msg.debug_payload = {"non_report": reason}
+        _add_message(db, session_id, ChatRole.ASSISTANT, reply_text, _after(user_msg), NON_REPORT_KIND)
+        db.commit()  # intent 없이 저장 → 신고 흐름이 시작되지 않은 상태 그대로
+        return StreamingResponse(_sse_once(reply_text), media_type="text/event-stream")
 
     # 3) 신고 — 먼저 접수를 도와드릴지 물음 (애매함→신고로 이어진 경우 원래 문장도 draft에 포함돼 있음)
     user_msg.intent = ChatIntent.REPORT
