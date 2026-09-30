@@ -12,12 +12,14 @@ from app.services.slot_filling import (
     ASK_FAC,
     ASK_LOC,
     ASK_LOCATION,
+    ASK_NST,
     ASK_PROB,
     ASK_PROBLEM,
     EUNJU_CHOICES,
     KIND_CHOOSE_B,
     KIND_CHOOSE_F,
     KIND_FACILITY,
+    KIND_NESTED,
     KIND_SPLIT,
     OFFER_MARKER,
     SUMMARY_MARKER,
@@ -877,3 +879,49 @@ def test_known_facilities_are_not_flagged() -> None:
 def test_facility_question_comes_after_building_question() -> None:
     q = next_question(extract_slots("은주관 7층 수영장에 있는 정수기가 고장났어요"), set())
     assert q is not None and q.key == ASK_LOC  # 은주1관/2관부터
+
+
+# ── 방 안에 엘리베이터 (없는 것 같은 조합은 한 번 확인) ─────────────────────────────────
+NESTED = "혜인관 2층 강의실 안에 있는 엘리베이터가 고장났어요."
+
+
+def test_elevator_inside_classroom_is_questioned_not_filed() -> None:
+    slots = extract_slots(NESTED)
+    assert slots.nested_facility == ("강의실", "엘리베이터")
+    assert slots.detail == "엘리베이터"  # 없는 "강의실 호수"를 묻지 않음
+    q = next_question(slots, set())
+    assert q is not None and q.key == KIND_NESTED
+    assert "강의실 안이 맞아요" in (q.choices or []) and "복도" in (q.choices or [])
+
+
+@pytest.mark.parametrize(
+    "text", ["혜인관 2층 강의실 앞 엘리베이터가 고장났어요", "강의실에서 엘리베이터까지 가는 길 바닥이 미끄러워요"]
+)
+def test_room_next_to_elevator_is_not_nested(text: str) -> None:
+    assert extract_slots(text).nested_facility is None
+
+
+def test_nested_answer_hallway_becomes_the_location() -> None:
+    draft = collect_draft(_history_until_question(NESTED, KIND_NESTED, "q"))
+    assert ASK_NST in draft.asked
+    extract, _ = draft.with_reply("복도")
+    slots = extract_slots("\n".join(extract))
+    assert (slots.building, slots.floor, slots.detail) == ("혜인관", "2", "복도")
+    after = next_question(slots, draft.asked)
+    assert after is None or after.key != KIND_NESTED
+
+
+def test_nested_unsure_answer_keeps_elevator_and_does_not_ask_room_number() -> None:
+    draft = collect_draft(_history_until_question(NESTED, KIND_NESTED, "q"))
+    extract, _ = draft.with_reply("잘 모르겠어요")
+    slots = extract_slots("\n".join(extract))
+    assert slots.detail == "엘리베이터"
+    assert next_question(slots, draft.asked, unsure=True) is None
+
+
+def test_nested_insisted_is_accepted_with_note() -> None:
+    draft = collect_draft(_history_until_question(NESTED, KIND_NESTED, "q"))
+    extract, _ = draft.with_reply("강의실 안이 맞아요")
+    slots = extract_slots("\n".join(extract))
+    assert slots.detail == "강의실"  # 학생이 고집하면 말한 대로 (호수를 묻는 흐름으로 이어짐)
+    assert "학교 정보와 달라서" in build_summary(slots, [NESTED], affirmed=True)

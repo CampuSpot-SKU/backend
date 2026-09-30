@@ -56,6 +56,11 @@ ASK_FACILITY = (
     "'{name}'은(는) 제가 아는 학교 시설에 없어요. 다른 시설이거나 다른 곳을 말씀하신 건 아닌지 "
     "다시 한번 확인해 주시겠어요? (정말 {name}이(가) 맞다면 '{name} 맞아요'라고 해 주세요)"
 )
+# 방 안에 엘리베이터가 있다고 했을 때 — 엘리베이터는 복도·로비 같은 공용 공간에 있어서 한 번 확인
+ASK_NESTED = (
+    "{room} 안에 {equip}가 있다고 하셨는데, 제가 아는 학교 정보와 달라서 확인하고 싶어요. "
+    "복도나 로비 같은 다른 곳을 말씀하신 건 아닌가요? (정말 {room} 안이 맞다면 '{room} 안이 맞아요'라고 해 주세요)"
+)
 EUNJU_CHOICES = ["은주1관", "은주2관", "잘 모르겠어요"]
 ASK_EUNJU = "은주1관인가요, 은주2관인가요? 잘 모르시면 '잘 모르겠어요'라고 해주세요."
 ASK_BUILDING_ONLY = "어느 건물인가요? (예: 혜인관)"
@@ -105,8 +110,8 @@ KIND_OFFER, KIND_LOCATION, KIND_PROBLEM, KIND_SUMMARY, KIND_EDIT, KIND_FLOOR = (
     "offer", "location", "problem", "summary", "edit", "floor"
 )
 KIND_FLOOR4, KIND_PLACE, KIND_ROOMCHECK = "floor4", "place", "roomcheck"
-KIND_SPLIT, KIND_CHOOSE_B, KIND_CHOOSE_F, KIND_FACILITY = (
-    "split", "choose_building", "choose_floor", "facility"
+KIND_SPLIT, KIND_CHOOSE_B, KIND_CHOOSE_F, KIND_FACILITY, KIND_NESTED = (
+    "split", "choose_building", "choose_floor", "facility", "nested"
 )
 CONFIRMED_MARK = "[위치 확인됨]"  # 여러 후보 중 학생이 하나를 골랐다는 표시 (추출용 텍스트에만 붙음)
 DONE_PREFIX = "신고가 접수됐어요"
@@ -125,7 +130,7 @@ LOCATION_MARKERS = (
 )
 ASK_LOC, ASK_PROB, ASK_FLR = "location", "problem", "floor"  # asked 집합에 들어가는 키
 ASK_FL4, ASK_PLC, ASK_RMC = "floor4", "place", "roomcheck"
-ASK_AMB, ASK_FAC = "ambiguous", "facility"  # 여러 건·후보 고르기 / 없는 시설 확인 (각각 1번만)
+ASK_AMB, ASK_FAC, ASK_NST = "ambiguous", "facility", "nested"  # 여러 건·후보 고르기 / 없는 시설 확인 (각각 1번만)
 
 # ── 카테고리 키워드 (카테고리 이름은 categories 테이블 시드값과 같아야 함) ──────────
 # 위에서부터 먼저 걸리는 카테고리로 정한다 → 구체적인 것(안전·전기·IT)을 일반적인 것(시설·설비)보다 위에.
@@ -236,6 +241,8 @@ class ReportSlots:
     location_uncertain: bool = False
     # 학교에 없다고 알려진 시설 이름 (수영장 등) — 있는 것처럼 받지 않고 한 번 확인
     unknown_facility: str | None = None
+    # 방 안에 엘리베이터가 있다고 함 → (방, 설비). 학생이 "방 안이 맞아요"라고 하면 그대로 받고 담당자가 확인
+    nested_facility: tuple[str, str] | None = None
 
     @property
     def has_location(self) -> bool:
@@ -406,6 +413,13 @@ def _impact(text: str, building: str | None, detail: str | None) -> Level:
     return Level.HIGH if (not private and bool(building or detail)) else Level.LOW
 
 
+# "강의실 안에 있는 엘리베이터"처럼 방 안에 건물 전체 설비가 있다는 말 (엘리베이터는 복도·로비 같은 공용 공간에 있음)
+_NESTED_RE = re.compile(
+    r"(강의실|화장실|연구실|사무실|교수실|실습실|실험실|휴게실|열람실)[ \t]*"
+    r"(?:(?:안|내부|속)(?:에|의)?|에)[ \t]*(?:있는[ \t]*)?(엘리베이터|엘베|승강기)"
+)
+_NESTED_INSIST_RE = re.compile(r"(?:안|내부|속)(?:이|은)?\s*맞")
+
 _FLOOR_UNKNOWN_RE = re.compile(
     r"(?:층|호수?|위치)(?:은|는|이|가|을|를)?\s*(?:정확히\s*)?(?:잘\s*)?(?:모르|몰라|기억\s*(?:이\s*)?안)"
     r"|아무\s*(?:층|곳|데)"
@@ -457,10 +471,14 @@ def extract_slots(
     near_outdoor = None if room else _match_outdoor_near(text, building)
     generic = None
     last_line = ""
+    nested = _NESTED_RE.search(text)
+    insist = bool(nested and _NESTED_INSIST_RE.search(text))  # 학생이 "강의실 안이 맞아요"라고 고집함
     for line in reversed(text.split("\n")):  # 장소는 가장 나중에 말한 메시지 기준 ("강의실" → 답: "복도")
         last_line = last_line or line
         generic = _find_first(line, DETAIL_PLACES)
         if generic:
+            if nested and not insist and generic == nested.group(1) and nested.group(0) in line:
+                generic = nested.group(2)  # "강의실 안 엘리베이터" — 방이 아니라 엘리베이터를 위치로 봄 (없는 강의실 안을 만들지 않음)
             break
     if generic == "엘베":
         generic = "엘리베이터"
@@ -491,7 +509,7 @@ def extract_slots(
         if room and floor and not floor_check:
             place = cp.find_room(building, floor, room)
             room_unlisted = place is None
-        elif not room and floor and not floor_check and 2 <= len(last_line.strip()) <= 20:
+        elif not room and floor and not floor_check and not insist and 2 <= len(last_line.strip()) <= 20:
             place = cp.find_by_name(building, floor, last_line)  # "학생과"처럼 이름으로 답한 경우
         if generic in ROOM_NEEDED and not cp.has_type(building, floor, generic):
             generic = None  # 강의실이 없는 건물·층에 "강의실"이라고 한 건 위치로 받지 않음 (없는 방을 만들지 않음)
@@ -535,6 +553,7 @@ def extract_slots(
         floor_unknown=not floor and bool(_FLOOR_UNKNOWN_RE.search(text)),
         location_uncertain=_location_uncertain(text, bool(building or floor)),
         unknown_facility=_find_first(text, campus_rules().get("unknown_facilities", [])),
+        nested_facility=(nested.group(1), nested.group(2)) if nested else None,
     )
 
 
@@ -821,7 +840,7 @@ def _apply_reply(extract: list[str], desc: list[str], prev_kind: str | None, tex
     text = _normalize_number_reply(prev_kind, text)
     if prev_kind in (
         KIND_LOCATION, KIND_PROBLEM, KIND_OFFER, KIND_FLOOR, KIND_FLOOR4, KIND_PLACE, KIND_ROOMCHECK,
-        KIND_SPLIT, KIND_CHOOSE_B, KIND_CHOOSE_F, KIND_FACILITY,
+        KIND_SPLIT, KIND_CHOOSE_B, KIND_CHOOSE_F, KIND_FACILITY, KIND_NESTED,
     ) and is_question_like(text):
         return  # 되묻기와 상관없는 질문 — 위치로도 상황으로도 쓰지 않음
     if prev_kind in (KIND_SPLIT, KIND_CHOOSE_B, KIND_CHOOSE_F) and extract:
@@ -850,6 +869,8 @@ def _message_kind(msg: MessageLike) -> str | None:
         return KIND_CHOOSE_F
     if "제가 아는 학교 시설에 없어요" in content:
         return KIND_FACILITY
+    if "제가 아는 학교 정보와 달라서 확인하고 싶어요" in content:
+        return KIND_NESTED
     if SUMMARY_MARKER in content:
         return KIND_SUMMARY
     if OFFER_MARKER in content:
@@ -907,6 +928,8 @@ def collect_draft(history: Sequence[MessageLike]) -> Draft:
                 add_ask(draft.asked, ASK_FLR)
             if prev_kind == KIND_FACILITY:
                 add_ask(draft.asked, ASK_FAC)
+            if prev_kind == KIND_NESTED:
+                add_ask(draft.asked, ASK_NST)
     last_is_report_reply = bool(history) and (
         history[-1].intent == ChatIntent.REPORT and history[-1].role == ChatRole.ASSISTANT
     )
@@ -1072,6 +1095,14 @@ def next_question(
         return Question(
             ASK_FACILITY.format(name=name), KIND_FACILITY, [f"{name} 맞아요", "잘 모르겠어요"], [name]
         )
+    # 방 안에 엘리베이터가 있다고 하면 한 번 확인 — "강의실 안이 맞아요"라고 하면 그대로 받고 담당자가 확인
+    if slots.nested_facility and _count_asks(asked, ASK_NST) < 1 and not affirmed:
+        room, equip = slots.nested_facility
+        equip = "엘리베이터" if equip == "엘베" else equip
+        return Question(
+            ASK_NESTED.format(room=room, equip=equip), KIND_NESTED,
+            ["복도", "로비·입구", f"{room} 안이 맞아요", "잘 모르겠어요"], [room, equip],
+        )
     # 4층이 없는 건물에서 4층이라고 하면 확인 — "맞아요"라고 하면 그대로, 층만 바꿔 말하면 그 층으로
     floor4_asks = _count_asks(asked, ASK_FL4)
     if (
@@ -1200,6 +1231,9 @@ def build_summary(slots: ReportSlots, texts: Sequence[str], affirmed: bool = Fal
             f"'{slots.unknown_facility}'은(는) 학교 시설 목록에서 확인하지 못해서 "
             "말씀하신 대로 적어 뒀고, 담당자가 다시 확인할게요."
         )
+    if slots.nested_facility and affirmed:  # 방 안이 맞다고 해서 받았지만 학교 정보와 달라 담당자가 확인
+        room, equip = slots.nested_facility
+        notes.append(f"{room} 안의 {equip}는 학교 정보와 달라서 말씀하신 대로 적어 뒀고, 담당자가 다시 확인할게요.")
     note = "".join(" " + n for n in notes)
     return f"정리해 볼게요. {body}{note} 이대로 {SUMMARY_MARKER}"
 
