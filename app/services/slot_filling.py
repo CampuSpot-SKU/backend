@@ -315,6 +315,24 @@ def _match_building(
     return None, None, False, None
 
 
+def _match_outdoor_near(text: str, building: str | None) -> str | None:
+    """"북악관 앞 정원"처럼 건물 바깥(앞·옆·뒤·근처, 정원·광장 같은 야외 장소)을 말했는지 → 위치 문구 ("앞 정원").
+
+    이런 곳은 층·호실이 없으므로 층을 되묻지 않는다. 야외 장소 단어 목록은 campus.json.
+    """
+    if not building:
+        return None
+    near = re.search(re.escape(building) + r"\s*(앞|옆|뒤|근처|주변)" + _END, text)
+    suffixes = campus_rules().get("unknown_place_suffixes", [])
+    word = None
+    if suffixes:
+        w = re.search(r"[가-힣A-Za-z0-9]{0,8}(?:" + "|".join(map(re.escape, suffixes)) + r")" + _END, text)
+        word = w.group(0) if w else None
+    if not near and not word:
+        return None
+    return " ".join(x for x in (near.group(1) if near else "", word or "") if x)
+
+
 def _match_facility(text: str) -> tuple[str, str, str | None] | None:
     """스포렉스·카페 SP처럼 건물 안 시설 이름 → (시설 이름, 건물, 층). 긴 별칭 우선."""
     facilities: dict[str, dict[str, str]] = campus_rules()["facilities"]
@@ -377,6 +395,7 @@ def extract_slots(
     rooms = _ROOM_RE.findall(text)
     room = rooms[-1].upper() if rooms else None  # 여러 번 말했으면 마지막 (정정 반영)
     outdoor = _find_first(text, campus_rules()["outdoor_places"])  # 정문·서문 등 건물 밖 장소
+    near_outdoor = None if room else _match_outdoor_near(text, building)
     generic = None
     last_line = ""
     for line in reversed(text.split("\n")):  # 장소는 가장 나중에 말한 메시지 기준 ("강의실" → 답: "복도")
@@ -428,6 +447,8 @@ def extract_slots(
         detail = f"{room}호" + (f" {generic}" if generic else "")
     elif outdoor and not building:
         detail = outdoor
+    elif not floor and not generic and near_outdoor:
+        detail = near_outdoor
     else:
         detail = generic
     category = _match_category(lowered)
@@ -438,7 +459,10 @@ def extract_slots(
         building=building,
         floor=floor,
         detail=detail,
-        detail_specific=bool(facility or unique or place or room or (outdoor and not building)),
+        detail_specific=bool(
+            facility or unique or place or room or (outdoor and not building)
+            or (near_outdoor and not floor and not generic)
+        ),
         category=category,
         has_problem=category is not None or any(w in lowered for w in PROBLEM_WORDS),
         impact=_impact(text, building or unknown_place, detail),

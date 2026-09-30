@@ -592,3 +592,15 @@ def test_fire_expressions_are_a_problem_and_urgent() -> None:
         assert slots.has_problem and slots.category == "안전" and slots.urgency == Level.HIGH
     lights = extract_slots("북악관 3층 복도 불이 나갔어요")
     assert lights.category != "안전" and lights.urgency == Level.LOW
+
+
+def test_outdoor_spot_near_building_needs_no_floor() -> None:
+    # 건물 바깥(앞·옆·정원 등)은 층·호실이 없으니 층을 되묻지 않고 위치로 인정
+    for text, where in [("북악관 앞 정원 벤치가 부서졌어요", "북악관 앞 정원"), ("혜인관 옆에서 넘어졌어요", "혜인관 옆")]:
+        slots = extract_slots(text)
+        assert slots.location_text == where and slots.detail_specific
+        question = next_question(slots, set())
+        assert question is None or question.key != "floor"
+    # 층·호수·일반 장소를 말하면 기존처럼 층/장소를 따짐
+    assert not extract_slots("북악관 벤치가 부서졌어요").detail_specific
+    assert extract_slots("북악관 3층 복도 불이 나갔어요").location_text == "북악관 3층 복도"
