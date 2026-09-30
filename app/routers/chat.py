@@ -46,6 +46,7 @@ from app.schemas.chat import (
     SlotsFilled,
     Unclear,
 )
+from app.services import campus_places as cp
 from app.services.ai_client import (
     AiServiceError,
     HistoryItem,
@@ -424,7 +425,7 @@ def _report_step(
     base = build_summary(slots, descs, affirmed)
     must = [t for t in [slots.location_text] if t and t in base] + ["접수"]
     if slots.floor_check and not affirmed:
-        must.append("4층")
+        must.append(cp.floor_label(slots.floor or "4"))
     summary = phrase(KIND_SUMMARY, base, must)
     reply = _add_message(db, session_id, ChatRole.ASSISTANT, summary, _after(user_msg), KIND_SUMMARY)
     reply.intent = ChatIntent.REPORT

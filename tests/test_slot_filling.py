@@ -54,7 +54,7 @@ REPORT, UNCLEAR = ChatIntent.REPORT, ChatIntent.UNCLEAR
         ("3동 2층 화장실 물이 계속 새요", "시설·설비", "3동 2층 화장실"),  # 없는 건물도 글자는 남김(되묻기)
         ("복도 조명이 깜빡거려요", "전기", "복도"),
         ("정문 근처 벤치가 부서져 있어요", "시설·설비", "정문"),
-        ("혜인관 301호 프로젝터가 안 켜져요", "IT·네트워크", "혜인관 3층 301호"),
+        ("혜인관 301호 프로젝터가 안 켜져요", "IT·네트워크", "혜인관 3층 301호 강의실"),
         ("혜인관 열람실 와이파이가 안 터져요", "IT·네트워크", "혜인관 열람실"),
         ("청운관 지하1층 화장실 냄새가 너무 심해요", "청소·위생", "청운관 지하 1층 화장실"),
         ("계단이 미끄러워요", "안전", "계단"),
@@ -474,12 +474,13 @@ def test_room_and_place_questions() -> None:
     q = next_question(slots, set())
     assert q is not None and q.key == "place" and "몇 호 강의실인가요?" in q.text
     assert q.choices is not None and "복도" in q.choices and q.choices[-1] == "잘 모르겠어요"
+    assert "301호 강의실" in q.choices  # 그 층에 실제 있는 강의실
     # 호수가 있거나 방이 아닌 장소(복도·화장실)면 더 안 물음
     assert next_question(extract_slots("혜인관 3층 301호 강의실 와이파이가 안 터져요"), set()) is None
     assert next_question(extract_slots("혜인관 3층 복도 조명이 깜빡거려요"), set()) is None
     # 장소를 전혀 모르면 호수·장소를 고르게 물음
     none_q = next_question(extract_slots("혜인관 3층 와이파이가 안 터져요"), set())
-    assert none_q is not None and none_q.key == "place" and "어떤 장소인가요?" in none_q.text
+    assert none_q is not None and none_q.key == "place" and "어느 호실인가요?" in none_q.text
     # 모른다고 하면 중단, 최대 2번
     assert next_question(slots, {"place"}, unsure=True) is None
     assert next_question(slots, {"place", "place#2"}) is None
@@ -513,3 +514,61 @@ def test_room_number_implies_floor() -> None:
     # 호수가 4xx면 4층 그대로 (건물에 4층이 없으면 확인)
     assert extract_slots("북악관 401호 에어컨이 안 나와요").floor_check
     assert next_question(extract_slots("혜인관 301호 프로젝터가 안 켜져요"), set()) is None  # 층을 또 묻지 않음
+
+
+# ── 학교 데이터 대조 (app/data/location_options.json) ───────────────────────────
+def test_named_facility_needs_no_building_or_floor() -> None:
+    """이름만으로 위치가 정해지는 곳(스포렉스, 학교에 하나뿐인 공연장)은 건물·층을 묻지 않음."""
+    for text, building in [("스포렉스 샤워실 온수가 안 나와요", "유담관"), ("공연장 조명이 나갔어요", "대일관")]:
+        slots = extract_slots(text)
+        assert slots.building == building and slots.floor and slots.detail_specific
+        assert next_question(slots, set()) is None
+
+
+def test_building_without_classrooms_does_not_take_classroom() -> None:
+    slots = extract_slots("청운관 강의실 와이파이가 안 터져요")
+    assert slots.building == "청운관" and slots.detail is None  # 없는 방을 만들지 않음
+    q = next_question(slots, set())
+    assert q is not None and q.key == "floor" and q.choices is not None
+    assert "4층" not in q.choices and "3층" in q.choices and "5층" in q.choices  # 실제 있는 층만
+    room_q = next_question(extract_slots("청운관 3층 강의실 와이파이가 안 터져요"), set())
+    assert room_q is not None and room_q.key == "place"
+    assert room_q.choices is not None and "301호 학생과 사무실" in room_q.choices  # 실제 호실 이름
+
+
+def test_room_name_answer_resolves_to_real_room() -> None:
+    slots = extract_slots("청운관 3층 와이파이가 안 터져요\n학생과")
+    assert slots.detail == "301호 학생과 사무실" and slots.detail_specific
+
+
+def test_floor_not_in_building_uses_real_floors() -> None:
+    slots = extract_slots("청운관 4층 복도 불이 깜빡여요")
+    assert slots.floor_check
+    q = next_question(slots, set())
+    assert q is not None and q.key == "floor4" and "지하 1층, 1~3층, 5~11층" in q.text
+    assert next_question(slots, set(), affirmed=True) is None  # "4층이 맞아요"면 그대로
+
+
+def test_unlisted_room_asks_once_then_is_marked() -> None:
+    slots = extract_slots("혜인관 3층 399호 에어컨이 안 나와요")
+    assert slots.room_unlisted and slots.detail == "399호"
+    q = next_question(slots, set())
+    assert q is not None and q.key == "roomcheck" and "399호가 맞아요" in (q.choices or [])
+    assert next_question(slots, {"roomcheck"}) is None  # 한 번만
+    assert "목록 확인" not in build_summary(slots, ["에어컨이 안 나와요"])
+    assert "담당자가 다시 확인" in build_summary(slots, ["에어컨이 안 나와요"])
+    assert "(목록에 없음)" in (slots.location_text or "")
+
+
+def test_basement_room_number() -> None:
+    slots = extract_slots("대일관 B101호 프로젝터가 안 켜져요")
+    assert slots.floor == "B1"
+
+
+def test_vague_complaint_is_not_a_known_problem() -> None:
+    """"이상해요"만으로는 무슨 문제인지 모름 → 상황을 되묻는다."""
+    slots = extract_slots("북악관 3층 복도가 이상해")
+    assert not slots.has_problem
+    q = next_question(slots, set())
+    assert q is not None and q.key == "problem"
+    assert extract_slots("북악관 3층 복도 불이 안 켜져요").has_problem
