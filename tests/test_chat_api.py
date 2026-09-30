@@ -328,7 +328,7 @@ def test_unknown_building_is_not_accepted_as_building(client: TestClient) -> Non
     first = begin(client, sid, "3동 2층 화장실 물이 계속 새요")
     # 우리 학교에 없는 "3동"은 건물로 받지 않고, 공식 목록을 보여주며 되물음
     assert "confirm_required" not in first
-    assert "'3동'은(는) 학교 건물 목록에 없어요" in first["follow_up_question"]
+    assert "'3동'은(는) 제가 아는 학교 장소에 없어요" in first["follow_up_question"]
     assert "혜인관" in first["follow_up_question"]
     assert first["slots_filled"]["building"] is None
     second = send(client, sid, "혜인관이요").json()
@@ -346,7 +346,7 @@ def test_unknown_building_still_unknown_after_one_ask_is_flagged(client: TestCli
     second = send(client, sid, "모르겠어요").json()
     assert second["confirm_required"] is True  # 되묻기는 1번뿐
     assert second["slots_filled"]["building"] is None  # 건물로는 절대 안 채움
-    assert "학교 건물 목록에 없어서" in second["summary"]
+    assert "제가 아는 학교 장소에 없어서" in second["summary"]
 
 
 def test_location_answer_with_problem_text_is_kept_in_description(client: TestClient) -> None:

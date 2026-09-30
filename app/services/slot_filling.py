@@ -37,7 +37,8 @@ ASK_LOCATION = "어디에서 생긴 문제인가요? 건물·층·장소를 알�
 ASK_LOCATION_GENERIC = "어느 건물 몇 층 {detail}인가요? (예: 은주1관 3층 {detail})"
 # 학교에 없는 건물 이름을 말했을 때 — 없는 건물을 건물로 받지 않고 공식 목록을 보여주며 되물음
 ASK_UNKNOWN_BUILDING = (
-    "'{name}'은(는) 학교 건물 목록에 없어요. 어느 건물인가요? "
+    "'{name}'은(는) 제가 아는 학교 장소에 없어요. 가까운 건물이 있으면 알려주세요. "
+    "건물이 아닌 곳이면 '잘 모르겠어요'라고 해도 접수는 돼요. "
     "(대일관·문예관·본관·북악관·상승관·유담관·은주1관·은주2관·청운관·한림관·혜인관·수인관)"
 )
 EUNJU_CHOICES = ["은주1관", "은주2관", "잘 모르겠어요"]
@@ -99,7 +100,7 @@ LOCATION_MARKERS = (
     "어느 건물 몇 층",
     "은주1관인가요, 은주2관인가요?",
     "에는 4층 표기가 없어요",
-    "학교 건물 목록에 없어요",
+    "제가 아는 학교 장소에 없어요",
     "어느 건물의 ",
     ASK_BUILDING_ONLY,
 )
@@ -848,7 +849,7 @@ def build_summary(slots: ReportSlots, texts: Sequence[str], affirmed: bool = Fal
         body = f"{slots.location_text}에서 '{situation}' 문제예요."
     elif slots.unknown_place and not slots.building:
         body = (
-            f"'{situation}' 문제이고, '{slots.unknown_place}'은(는) 학교 건물 목록에 없어서 "
+            f"'{situation}' 문제이고, '{slots.unknown_place}'은(는) 제가 아는 학교 장소에 없어서 "
             "위치는 담당자가 확인할게요."
         )
     else:

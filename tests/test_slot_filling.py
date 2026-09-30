@@ -85,7 +85,7 @@ def test_unknown_building_name_is_not_a_building() -> None:
         assert slots.unknown_place == name
         assert not slots.has_location  # 호수·열람실이 있어도 어느 건물인지 모름
         q = next_question(slots, set())
-        assert q is not None and f"'{name}'은(는) 학교 건물 목록에 없어요" in q.text
+        assert q is not None and f"'{name}'은(는) 제가 아는 학교 장소에 없어요" in q.text
     # 한 번 물었는데도 모르면 다시 묻고, "모르겠어요"라고 하면(unsure) 그대로 요약으로
     again = next_question(extract_slots("7동 엘리베이터 고장났어요"), {ASK_LOC})
     assert again is not None and again.key == ASK_LOC
