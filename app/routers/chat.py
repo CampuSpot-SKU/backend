@@ -79,6 +79,7 @@ from app.services.slot_filling import (
     build_summary,
     collect_draft,
     extract_slots,
+    find_ambiguity,
     is_cancel,
     is_confirm,
     is_edit,
@@ -438,7 +439,9 @@ def _report_step(
     # 학생이 마지막 답에서 "모르겠어요"라고 했으면 그 항목은 다시 묻지 않음
     unsure = bool(texts) and any(w in texts[-1] for w in UNKNOWN_WORDS)
     affirmed = any("맞" in t for t in texts)  # "4층이 맞아요" 같은 확인
-    question = next_question(slots, asked, unsure, affirmed)
+    question = next_question(
+        slots, asked, unsure, affirmed, find_ambiguity(texts[0]) if texts else None
+    )
     if question is not None:
         base = (INTRO if intro else "") + question.text
         content = phrase(question.key, base, question.must_include)

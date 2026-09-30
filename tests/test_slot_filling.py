@@ -7,12 +7,18 @@ import pytest
 
 from app.models.enums import ChatIntent, ChatRole, Level
 from app.services.slot_filling import (
+    ASK_AMB,
     ASK_EUNJU,
+    ASK_FAC,
     ASK_LOC,
     ASK_LOCATION,
     ASK_PROB,
     ASK_PROBLEM,
     EUNJU_CHOICES,
+    KIND_CHOOSE_B,
+    KIND_CHOOSE_F,
+    KIND_FACILITY,
+    KIND_SPLIT,
     OFFER_MARKER,
     SUMMARY_MARKER,
     BuildingRef,
@@ -22,6 +28,7 @@ from app.services.slot_filling import (
     build_summary,
     collect_draft,
     extract_slots,
+    find_ambiguity,
     is_cancel,
     is_confirm,
     is_edit,
@@ -665,3 +672,208 @@ def test_judge_reason_falls_back_to_rules_without_ai_reason() -> None:
     slots = extract_slots("혜인관 2층 화장실 물이 계속 새요")
     assert slots.reason is None
     assert judge_reason(slots, "P2") == "여러 사람이 쓰는 공간이고 급한 위험 신호는 없어 P2로 판단했어요."
+
+
+# ── 예외처리 보완 (엘리베이터·여러 건·불확실한 위치·없는 시설) ──────────────────────────────────
+def _history_until_question(first: str, kind: str, question: str) -> list[Msg]:
+    """첫 신고 → 접수 제안 → "네" → (kind) 되묻기까지의 저장된 대화."""
+    return [
+        Msg(U, first, REPORT),
+        Msg(A, "접수를 도와드릴까요?", REPORT, debug_payload={"kind": "offer"}),
+        Msg(U, "네, 접수해 주세요", REPORT),
+        Msg(A, question, REPORT, debug_payload={"kind": kind}),
+    ]
+
+
+@pytest.mark.parametrize("text", ["유담관 엘리베이터 고장났어요", "혜인관 3층 엘리베이터가 멈췄어요", "청운관 엘베 고장"])
+def test_elevator_needs_only_building(text: str) -> None:
+    """엘리베이터는 건물 전체 설비 — 건물만 알면 층·호수를 묻지 않고 바로 요약으로 간다."""
+    assert next_question(extract_slots(text), set()) is None
+
+
+def test_elevator_without_building_asks_building_only() -> None:
+    for text in ("엘리베이터가 고장났어요", "엘베 고장났어요"):
+        q = next_question(extract_slots(text), set())
+        assert q is not None
+        assert q.key == ASK_LOC
+        assert "층" not in q.text
+        assert "엘리베이터" in q.text
+
+
+def test_elevator_nickname_is_understood() -> None:
+    slots = extract_slots("북악관 엘베 고장났어요")
+    assert slots.detail == "엘리베이터"
+    assert slots.category == "시설·설비"
+
+
+def test_other_places_still_ask_floor() -> None:
+    q = next_question(extract_slots("청운관 화장실 변기가 막혔어요"), set())
+    assert q is not None and "몇 층" in q.text
+
+
+def test_dirty_word_variant_is_cleaning() -> None:
+    assert extract_slots("본관 화장실이 너무 더럽습니다").category == "청소·위생"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "청운관 2층 정수기가 고장났어요. 물도 안 나와요",  # 같은 정수기의 두 증상
+        "북악관 화장실에 냄새나고 더러워요",
+        "정수기가 고장났어요. 3층이요",
+        "혜인관 2층 정수기가 고장났어요",
+        "유담관 2층 정수기가 고장났다고 신고했는데 알고 보니 유담관에는 정수기가 없어요",
+    ],
+)
+def test_single_issue_has_no_ambiguity(text: str) -> None:
+    assert find_ambiguity(text) is None
+
+
+def test_multiple_issues_are_split_not_merged() -> None:
+    amb = find_ambiguity("청운관 2층 정수기가 고장났고 북악관 2층 화장실 변기도 막혔어요.")
+    assert amb is not None and amb.kind == "issues"
+    assert amb.options == ["청운관 2층 정수기가 고장났고", "북악관 2층 화장실 변기도 막혔어요"]
+    q = next_question(extract_slots("x"), set(), ambiguity=amb)
+    assert q is not None and q.key == KIND_SPLIT and q.choices == amb.options
+
+
+def test_three_issues_and_request_tail_is_removed() -> None:
+    text = (
+        "청운관 4층 정수기가 고장났고 북악관 1층 화장실도 막혔어요. 그리고 혜인관 옆 스타벅스 앞 "
+        "가로등도 꺼져있는데 세 개 다 접수해주세요."
+    )
+    amb = find_ambiguity(text)
+    assert amb is not None and amb.kind == "issues" and len(amb.options) == 3
+    assert all("접수해주세요" not in o for o in amb.options)
+
+
+def test_later_issue_inherits_building_of_earlier_one() -> None:
+    amb = find_ambiguity("북악관 1층 화장실에 쓰레기가 많고 2층 자판기도 고장났어요.")
+    assert amb is not None and amb.kind == "issues"
+    second = extract_slots(amb.extracts[1])
+    assert (second.building, second.floor) == ("북악관", "2")  # 없는 "2층 화장실"을 지어내지 않음
+
+
+def test_two_buildings_in_one_issue_ask_which() -> None:
+    amb = find_ambiguity("청운관인지 북악관인지 잘 모르겠는데 정수기가 고장났어요.")
+    assert amb is not None and amb.kind == "building" and amb.options == ["청운관", "북악관"]
+    q = next_question(extract_slots("x"), set(), ambiguity=amb)
+    assert q is not None and q.key == KIND_CHOOSE_B and "잘 모르겠어요" in (q.choices or [])
+
+
+def test_two_floors_in_one_issue_ask_which() -> None:
+    amb = find_ambiguity("북악관 2층이라고 했는데 사실 3층일 수도 있어요.")
+    assert amb is not None and amb.kind == "floor" and amb.options == ["2층", "3층"]
+
+
+def test_split_answer_keeps_only_the_chosen_issue() -> None:
+    first = "청운관 2층 정수기가 고장났고 북악관 2층 화장실 변기도 막혔어요."
+    amb = find_ambiguity(first)
+    assert amb is not None
+    draft = collect_draft(_history_until_question(first, KIND_SPLIT, "한 번에 한 건씩 접수할 수 있어요."))
+    assert ASK_AMB in draft.asked
+    extract, desc = draft.with_reply(amb.options[1])
+    slots = extract_slots("\n".join(extract))
+    assert (slots.building, slots.floor, slots.detail) == ("북악관", "2", "화장실")
+    assert "청운관" not in "\n".join(extract) and "정수기" not in "\n".join(desc)
+    assert find_ambiguity(extract[0]) is None
+
+
+def test_split_answer_by_ordinal_word() -> None:
+    first = "청운관 2층 정수기가 고장났고 북악관 2층 화장실 변기도 막혔어요."
+    draft = collect_draft(_history_until_question(first, KIND_SPLIT, "q"))
+    extract, _ = draft.with_reply("첫 번째 거요")
+    assert extract_slots("\n".join(extract)).building == "청운관"
+
+
+def test_unrecognized_split_answer_asks_once_more_then_gives_up() -> None:
+    first = "청운관 2층 정수기가 고장났고 북악관 2층 화장실 변기도 막혔어요."
+    amb = find_ambiguity(first)
+    assert amb is not None
+    draft = collect_draft(_history_until_question(first, KIND_SPLIT, "q"))
+    draft.with_reply("전부 다요")
+    assert next_question(extract_slots(first), draft.asked, ambiguity=amb).key == KIND_SPLIT  # type: ignore[union-attr]
+    again = {ASK_AMB, f"{ASK_AMB}#2"}
+    q = next_question(extract_slots(first), again, ambiguity=amb)
+    assert q is None or q.key != KIND_SPLIT
+
+
+def test_building_answer_masks_the_other_candidate() -> None:
+    first = "청운관인지 북악관인지 잘 모르겠는데 정수기가 고장났어요."
+    draft = collect_draft(_history_until_question(first, KIND_CHOOSE_B, "q"))
+    extract, desc = draft.with_reply("청운관")
+    slots = extract_slots("\n".join(extract))
+    assert slots.building == "청운관" and not slots.location_uncertain
+    assert "북악관" in "\n".join(desc)  # 상황 기록(description)엔 학생이 한 말을 그대로 둠
+
+
+def test_building_unsure_answer_does_not_guess() -> None:
+    first = "청운관인지 북악관인지 잘 모르겠는데 정수기가 고장났어요."
+    draft = collect_draft(_history_until_question(first, KIND_CHOOSE_B, "q"))
+    extract, _ = draft.with_reply("잘 모르겠어요")
+    slots = extract_slots("\n".join(extract))
+    assert slots.building is None  # 둘 중 하나를 임의로 고르지 않음
+    assert next_question(slots, draft.asked, unsure=True) is None  # 더 묻지 않고 요약(담당자가 확인)으로
+
+
+def test_floor_answer_bare_number_and_confirmed() -> None:
+    first = "북악관 2층이라고 했는데 사실 3층일 수도 있어요."
+    draft = collect_draft(_history_until_question(first, KIND_CHOOSE_F, "q"))
+    extract, _ = draft.with_reply("3")
+    slots = extract_slots("\n".join(extract))
+    assert (slots.building, slots.floor) == ("북악관", "3")
+    assert not slots.location_uncertain  # 학생이 골랐으므로 확정
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "본관인 것 같은데 정확한 건물은 모르겠어요",
+        "은주관 3층 화장실이라고 들었는데 직접 확인하지는 못했어요",
+        "북악관 3층일 수도 있어요 화장실 막혔어요",
+    ],
+)
+def test_uncertain_location_is_flagged_not_asserted(text: str) -> None:
+    slots = extract_slots(text)
+    assert slots.location_uncertain
+    assert (slots.location_text or "").endswith("(학생도 확실하지 않음)")
+    assert "담당자가 다시 확인할게요" in build_summary(slots, [text])
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["청운관 정수기가 고장난 것 같아요", "강의실 에어컨 고장난듯?", "혜인관 2층 정수기 고장난 거 같아여", "본관 맞아요 본관인 것 같은데"],
+)
+def test_uncertainty_about_the_problem_is_not_location_uncertainty(text: str) -> None:
+    assert not extract_slots(text).location_uncertain
+
+
+def test_unknown_floor_is_not_asked_or_invented() -> None:
+    text = "북악관 에어컨이 고장났어요. 정확한 층은 모르겠고 사진도 없어요. 그냥 아무 층이나 접수해주세요."
+    slots = extract_slots(text)
+    assert slots.floor is None and slots.floor_unknown
+    q = next_question(slots, set())
+    assert q is None or q.key != "floor"
+
+
+def test_unknown_facility_asks_once_then_notes_in_summary() -> None:
+    text = "청운관 2층에 있는 수영장이 너무 더러워요."
+    slots = extract_slots(text)
+    assert slots.unknown_facility == "수영장"
+    q = next_question(slots, set())
+    assert q is not None and q.key == KIND_FACILITY and "수영장 맞아요" in (q.choices or [])
+    after = next_question(slots, {ASK_FAC})  # 이미 물었으면 다시 묻지 않음
+    assert after is None or after.key != KIND_FACILITY
+    assert "수영장" in build_summary(slots, [text], affirmed=True)
+    confirmed = next_question(slots, set(), affirmed=True)  # "수영장 맞아요"
+    assert confirmed is None or confirmed.key != KIND_FACILITY
+
+
+def test_known_facilities_are_not_flagged() -> None:
+    assert extract_slots("유담관 스포렉스 샤워실 물이 안 나와요").unknown_facility is None
+    assert extract_slots("혜인관 2층 정수기가 고장났어요").unknown_facility is None
+
+
+def test_facility_question_comes_after_building_question() -> None:
+    q = next_question(extract_slots("은주관 7층 수영장에 있는 정수기가 고장났어요"), set())
+    assert q is not None and q.key == ASK_LOC  # 은주1관/2관부터

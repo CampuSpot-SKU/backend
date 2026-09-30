@@ -41,6 +41,21 @@ ASK_UNKNOWN_BUILDING = (
     "건물이 아닌 곳이면 '잘 모르겠어요'라고 해도 접수는 돼요. "
     "(대일관·문예관·본관·북악관·상승관·유담관·은주1관·은주2관·청운관·한림관·혜인관·수인관)"
 )
+# 엘리베이터는 건물 전체의 설비라 층이 아니라 건물만 물음 (특정 층만 고장나는 설비가 아님)
+ASK_LOCATION_BUILDING_WIDE = "어느 건물의 {detail}인가요? (예: 은주1관 {detail})"
+# 한 메시지에 여러 건이 섞여 있을 때 — 하나로 합쳐 접수하지 않고 한 건씩 고르게 함
+ASK_SPLIT = (
+    "한 번에 한 건씩 접수할 수 있어요. 먼저 접수할 건을 골라 주세요. "
+    "나머지는 이 건을 접수한 뒤에 이어서 말씀해 주세요."
+)
+# 한 건인데 건물·층이 둘 이상 나왔을 때 — 하나를 골라 임의로 정하지 않고 되물음
+ASK_CHOOSE_BUILDING = "건물이 여러 곳 나왔어요. 어느 건물 건으로 접수할까요? ({names})"
+ASK_CHOOSE_FLOOR = "층이 여러 개 나왔어요. 어느 층 건으로 접수할까요? ({names})"
+# 학교에 없다고 알려진 시설 이름을 말했을 때 (campus.json의 unknown_facilities)
+ASK_FACILITY = (
+    "'{name}'은(는) 제가 아는 학교 시설에 없어요. 다른 시설이거나 다른 곳을 말씀하신 건 아닌지 "
+    "다시 한번 확인해 주시겠어요? (정말 {name}이(가) 맞다면 '{name} 맞아요'라고 해 주세요)"
+)
 EUNJU_CHOICES = ["은주1관", "은주2관", "잘 모르겠어요"]
 ASK_EUNJU = "은주1관인가요, 은주2관인가요? 잘 모르시면 '잘 모르겠어요'라고 해주세요."
 ASK_BUILDING_ONLY = "어느 건물인가요? (예: 혜인관)"
@@ -90,6 +105,10 @@ KIND_OFFER, KIND_LOCATION, KIND_PROBLEM, KIND_SUMMARY, KIND_EDIT, KIND_FLOOR = (
     "offer", "location", "problem", "summary", "edit", "floor"
 )
 KIND_FLOOR4, KIND_PLACE, KIND_ROOMCHECK = "floor4", "place", "roomcheck"
+KIND_SPLIT, KIND_CHOOSE_B, KIND_CHOOSE_F, KIND_FACILITY = (
+    "split", "choose_building", "choose_floor", "facility"
+)
+CONFIRMED_MARK = "[위치 확인됨]"  # 여러 후보 중 학생이 하나를 골랐다는 표시 (추출용 텍스트에만 붙음)
 DONE_PREFIX = "신고가 접수됐어요"
 RESET_NOTE = "(새 대화를 시작했어요)"  # 페이지를 새로 열었을 때 진행 중이던 신고 흐름을 끝내는 표식
 THANKS_REPLY = "도움이 됐다니 다행이에요! 다른 불편한 점이 있으면 언제든 말씀해 주세요."
@@ -106,6 +125,7 @@ LOCATION_MARKERS = (
 )
 ASK_LOC, ASK_PROB, ASK_FLR = "location", "problem", "floor"  # asked 집합에 들어가는 키
 ASK_FL4, ASK_PLC, ASK_RMC = "floor4", "place", "roomcheck"
+ASK_AMB, ASK_FAC = "ambiguous", "facility"  # 여러 건·후보 고르기 / 없는 시설 확인 (각각 1번만)
 
 # ── 카테고리 키워드 (카테고리 이름은 categories 테이블 시드값과 같아야 함) ──────────
 # 위에서부터 먼저 걸리는 카테고리로 정한다 → 구체적인 것(안전·전기·IT)을 일반적인 것(시설·설비)보다 위에.
@@ -116,10 +136,10 @@ CATEGORY_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
              "누전", "감전", "정전", "스위치", "차단기", "스파크")),
     ("IT·네트워크", ("와이파이", "wifi", "인터넷", "네트워크", "프로젝터", "빔", "컴퓨터", "pc",
                     "모니터", "프린터", "출결", "랜선", "전자칠판")),
-    ("청소·위생", ("냄새", "악취", "쓰레기", "더러", "청소", "벌레", "바퀴", "곰팡이", "오물",
+    ("청소·위생", ("냄새", "악취", "쓰레기", "더러", "더럽", "청소", "벌레", "바퀴", "곰팡이", "오물",
                   "토사물", "휴지가 없", "휴지 없")),
     ("시설·설비", ("고장", "물이 새", "새요", "샌다", "누수", "수도", "정수기", "에어컨", "냉방",
-                  "난방", "히터", "엘리베이터", "승강기", "변기", "막혔", "막혀", "문이 안", "손잡이", "잠금",
+                  "난방", "히터", "엘리베이터", "엘베", "승강기", "변기", "막혔", "막혀", "문이 안", "손잡이", "잠금",
                   "도어락", "의자", "책상", "벤치", "파손", "부서", "깨졌", "창문", "블라인드", "배수")),
 ]
 DEFAULT_CATEGORY = "기타"
@@ -143,10 +163,16 @@ EMERGENCY_WORDS = ("누전", "감전", "스파크", "불꽃", "화재", "불이 
 PRIVATE_PLACES = ("연구실", "사무실", "교수실", "호실", "내 방", "우리 방", "사물함", "개인")
 
 # 건물 안 세부 장소 → reports.detail
-DETAIL_PLACES = ("화장실", "강의실", "복도", "계단", "엘리베이터", "승강기", "로비", "휴게실",
+DETAIL_PLACES = ("화장실", "강의실", "복도", "계단", "엘리베이터", "엘베", "승강기", "로비", "휴게실",
                  "열람실", "실습실", "실험실", "연구실", "사무실", "교수실", "샤워실", "세탁실",
                  "흡연구역", "출입구", "입구", "주차장", "옥상", "식당", "매점", "카페", "라운지",
                  "사물함", "베란다", "현관")
+# 층과 상관없이 건물 전체에 하나 있는 설비 — 건물만 알면 위치가 충분함 (층·호수를 묻지 않음)
+BUILDING_WIDE = ("엘리베이터", "승강기")
+# 이 단어가 들어 있으면 "신고할 대상이 있는 말"로 봄 (여러 건 구분용)
+TARGET_WORDS = ("정수기", "에어컨", "자판기", "엘리베이터", "엘베", "승강기", "변기", "쓰레기통", "가로등",
+                "의자", "책상", "프로젝터", "조명", "전등", "콘센트", "와이파이", "수도", "히터", "난방",
+                "냉방", "복사기", "프린터", "컴퓨터", "창문", "세면대", "휴지")
 # 건물명 목록(buildings)이 비어 있어도 알아볼 수 있는 교내 장소
 UNKNOWN_LANDMARKS = ("기숙사", "도서관", "운동장", "학생회관", "대강당")  # 학교 건물 목록에 없는 곳
 
@@ -204,6 +230,12 @@ class ReportSlots:
     unknown_place: str | None = None
     # AI 판정 이유 한 줄 (1-3b) — AI 판정이 없거나 실패하면 None (그러면 규칙 기반 문구를 씀)
     reason: str | None = None
+    # 학생이 층을 모른다고 말함 ("정확한 층은 모르겠고", "아무 층이나") — 층을 되묻지 않고 지어내지도 않음
+    floor_unknown: bool = False
+    # 학생도 위치가 확실하지 않다고 함 ("본관인 것 같은데", "들었는데 확인 못 했어요") — 확정 정보처럼 저장하지 않음
+    location_uncertain: bool = False
+    # 학교에 없다고 알려진 시설 이름 (수영장 등) — 있는 것처럼 받지 않고 한 번 확인
+    unknown_facility: str | None = None
 
     @property
     def has_location(self) -> bool:
@@ -221,6 +253,8 @@ class ReportSlots:
             parts.append(f"지하 {self.floor[1:]}층" if self.floor.startswith("B") else f"{self.floor}층")
         parts.append(self.detail + (" (목록에 없음)" if self.room_unlisted and self.detail else "") if self.detail else None)
         text = " ".join(p for p in parts if p)
+        if text and self.location_uncertain:
+            text += " (학생도 확실하지 않음)"
         return text or None
 
 
@@ -372,6 +406,25 @@ def _impact(text: str, building: str | None, detail: str | None) -> Level:
     return Level.HIGH if (not private and bool(building or detail)) else Level.LOW
 
 
+_FLOOR_UNKNOWN_RE = re.compile(
+    r"(?:층|호수?|위치)(?:은|는|이|가|을|를)?\s*(?:정확히\s*)?(?:잘\s*)?(?:모르|몰라|기억\s*(?:이\s*)?안)"
+    r"|아무\s*(?:층|곳|데)"
+)
+
+
+def _location_uncertain(text: str, has_location: bool) -> bool:
+    """건물·층을 말하긴 했는데 학생도 확실하지 않다는 표현이 붙어 있나 ("본관인 것 같은데", "3층일 수도")."""
+    if not has_location or CONFIRMED_MARK in text or re.search(r"맞아요|맞습니다", text):
+        return False
+    names = "|".join(map(re.escape, [*campus_rules()["buildings"], "은주관"]))
+    loc = rf"(?:{names}|\d{{1,2}}\s*층)"
+    return bool(
+        re.search(loc + r"(?:\s*(?:인|이|일|은|는))?\s*(?:것\s*같|같은데|같아|듯|수도|지도|아닐까)", text)
+        or re.search(loc + r".{0,12}?(?:라고|이라고)\s*들었", text)
+        or re.search(r"확인하지\s*(?:는\s*)?못|확인\s*못", text)
+    )
+
+
 def extract_slots(
     text: str, buildings: Sequence[BuildingRef] = (), safety_concern: bool = False
 ) -> ReportSlots:
@@ -409,6 +462,8 @@ def extract_slots(
         generic = _find_first(line, DETAIL_PLACES)
         if generic:
             break
+    if generic == "엘베":
+        generic = "엘리베이터"
     gender = _GENDER_TOILET_RE.search(text)
     if generic == "화장실" and gender:  # 남/여는 학생이 말했을 때만 기록 (추측 금지)
         generic = f"{gender.group(1)}자 화장실"
@@ -477,6 +532,9 @@ def extract_slots(
         unknown_place=None if building else unknown_place,
         floor_check=floor_check,
         room_unlisted=room_unlisted,
+        floor_unknown=not floor and bool(_FLOOR_UNKNOWN_RE.search(text)),
+        location_uncertain=_location_uncertain(text, bool(building or floor)),
+        unknown_facility=_find_first(text, campus_rules().get("unknown_facilities", [])),
     )
 
 
@@ -550,6 +608,152 @@ def apply_form(
     return out
 
 
+# ── 여러 건·여러 후보 (예외처리) ────────────────────────────────────────────────
+# 한 메시지에 문제가 둘 이상이거나 건물·층이 둘 이상 나오면, 하나를 임의로 골라 다른 건 버리지 않고 되묻는다.
+@dataclass
+class Ambiguity:
+    kind: str  # "issues"(여러 건) | "building"(건물 여럿) | "floor"(층 여럿)
+    options: list[str]  # 학생에게 보여줄 선택지 (issues는 건별 문장, building은 건물 이름, floor는 "2층")
+    codes: list[str] = field(default_factory=list)  # floor: "2" / "B1"
+    # issues: 건별 슬롯 추출용 문장 (건물이 없으면 앞 문장의 건물을 이어받고, 문제 설명이 아닌 문장은 같이 붙임)
+    extracts: list[str] = field(default_factory=list)
+
+
+_CLAUSE_SPLIT_RE = re.compile(
+    r"(?<=[.!?])\s+"
+    r"|(?<=\S고)(?<!라고)(?<!다고)(?<!냐고)(?<!자고)(?<!래고)(?<!대고)(?<!알고)(?<!보고)(?<!듣고)\s+"
+    r"|,\s*|\s+(?:그리고는?|또한|또)\s+"
+)
+_REQUEST_TAIL_RE = re.compile(
+    r"\s*(?:\S+\s*개를?\s*)?(?:(?:한\s*번에|다|모두|일단)\s*)*(?:접수|신고)\s*해\s*주세요\S*$"
+)
+_FLOOR_STRICT_RE = re.compile(r"지하\s*(\d{1,2})\s*층|[Bb]\s*(\d{1,2})\s*층|(\d{1,2})\s*층")
+_ORDINALS = (
+    ("첫번째", "첫째", "처음", "1번", "앞에", "위에"),
+    ("두번째", "둘째", "2번", "뒤에", "아래", "나중"),
+    ("세번째", "셋째", "3번"),
+)
+
+
+def _clauses(text: str) -> list[str]:
+    parts = [c.strip(" ,") for c in _CLAUSE_SPLIT_RE.split(text.strip())]
+    return [c for c in parts if c and c not in ("그리고", "그리고는", "또", "또한")]
+
+
+def _building_mentions(text: str) -> list[str]:
+    """문장에 나온 건물 이름 (나온 순서, 중복 없음). 은주관은 1·2관이 갈리지만 건물 하나로 셈."""
+    names = [*campus_rules()["buildings"], "은주관"]
+    return [n for _, n in sorted((text.find(n), n) for n in names if n in text)]
+
+
+def _floor_mentions(text: str) -> tuple[list[str], list[str]]:
+    """문장에 나온 층 (코드, 표시 이름) — 나온 순서, 중복 없음. "층"이라고 쓴 것만 셈."""
+    codes: list[str] = []
+    for m in _FLOOR_STRICT_RE.finditer(text):
+        g1, g2, g3 = m.groups()
+        code = f"B{g1 or g2}" if (g1 or g2) else g3
+        if code not in codes:
+            codes.append(code)
+    return codes, [cp.floor_label(c) for c in codes]
+
+
+def _is_issue(clause: str) -> bool:
+    """신고할 문제 하나를 말하는 절인가 — 문제를 말하고, 무엇·어디인지(대상)가 있어야 함."""
+    problem = _has_problem_text(clause) or any(w in clause for w in VAGUE_PROBLEM_WORDS)
+    target = bool(
+        _FLOOR_STRICT_RE.search(clause) or _building_mentions(clause)
+        or _find_first(clause, DETAIL_PLACES) or any(w in clause for w in TARGET_WORDS)
+    )
+    return problem and target
+
+
+def find_ambiguity(first_text: str) -> Ambiguity | None:
+    """신고 첫 메시지에서 여러 건·여러 후보를 찾는다. 없으면 None. (첫 메시지만 봄 — 나중 정정은 마지막 말이 우선)"""
+    text = first_text.replace(CONFIRMED_MARK, " ")
+    parts = _clauses(text)
+    issues = [c for c in parts if _is_issue(c)]
+    if len(issues) >= 2:
+        context = " ".join(c for c in parts if c not in issues)
+        options: list[str] = []
+        extracts: list[str] = []
+        for c in issues:
+            label = _REQUEST_TAIL_RE.sub("", c).strip(" ,.!?") or c
+            if label in options:
+                continue
+            before = text[: text.find(c)]
+            inherited = "" if _building_mentions(c) else (_building_mentions(before) or [""])[-1]
+            options.append(label)
+            extracts.append(" ".join(x for x in (inherited, label, context) if x))
+        if len(options) >= 2:
+            return Ambiguity("issues", options, extracts=extracts)
+    buildings = _building_mentions(text)
+    if len(buildings) >= 2:
+        return Ambiguity("building", buildings)
+    codes, labels = _floor_mentions(text)
+    if len(codes) >= 2:
+        return Ambiguity("floor", labels, codes)
+    return None
+
+
+def _pick_issue(amb: Ambiguity, text: str) -> int | None:
+    t = _compact(text)
+    for i, option in enumerate(amb.options):
+        o = _compact(option)
+        if o and (o in t or (len(t) >= 4 and t in o)):
+            return i
+    m = re.fullmatch(r"\s*([1-9])\s*(?:번째?)?\s*", text)
+    if m and int(m.group(1)) <= len(amb.options):
+        return int(m.group(1)) - 1
+    for i, words in enumerate(_ORDINALS):
+        if i < len(amb.options) and any(w in t for w in words):
+            return i
+    return None
+
+
+def _floor_regex(code: str) -> re.Pattern[str]:
+    if code.startswith("B"):
+        n = code[1:]
+        return re.compile(rf"(?:지하\s*{n}\s*층|[Bb]\s*{n}\s*층)")
+    return re.compile(rf"(?<!\d){code}\s*층")
+
+
+def _resolve_ambiguity(amb: Ambiguity, extract: list[str], desc: list[str], text: str) -> str | None:
+    """되묻기에 대한 답을 반영해 추출용/상황용 목록을 정리. 결과: "done"(한 건 고름) / "picked"(후보 중 하나 고름) /
+    "unsure"(모르겠다고 함 — 후보를 모두 비움) / None(알아듣지 못함)."""
+    if amb.kind == "issues":
+        i = _pick_issue(amb, text)
+        if i is None:
+            return None
+        extract[:] = [amb.extracts[i]]
+        desc[:] = [amb.options[i]]
+        return "done"
+    unsure = any(w in text for w in UNKNOWN_WORDS)
+    keep: str | None = None
+    if amb.kind == "building":
+        picked = [n for n in amb.options if n in text]
+        if picked:
+            keep = max(picked, key=text.rfind)  # 여러 개 말했으면 마지막
+        elif not unsure:
+            return None
+        for i, e in enumerate(extract):
+            for n in amb.options:
+                if n != keep:
+                    e = e.replace(n, " ")
+            extract[i] = e
+    else:
+        code = _match_floor(text)
+        if code in amb.codes:
+            keep = code
+        elif not unsure:
+            return None
+        for i, e in enumerate(extract):
+            for c in amb.codes:
+                if c != keep:
+                    e = _floor_regex(c).sub(" ", e)
+            extract[i] = e
+    return "picked" if keep else "unsure"
+
+
 # ── 대화 흐름 ────────────────────────────────────────────────────────────────
 class MessageLike(Protocol):
     """chat_messages 한 줄 중 여기서 필요한 필드 (테스트에선 간단한 객체로 대체 가능)."""
@@ -602,7 +806,9 @@ _BARE_NUMBER_RE = re.compile(r"\s*(\d{1,4})\s*(?:번|층|호)?\s*(?:이에요|�
 def _normalize_number_reply(prev_kind: str | None, text: str) -> str:
     """"3"처럼 숫자만 답한 걸 직전 질문에 맞춰 "3층"/"301호"로 이해 (층·건물·4층 확인 질문 뒤엔 층, 장소 질문 뒤엔 호수)."""
     m = _BARE_NUMBER_RE.fullmatch(text)
-    if not m or prev_kind not in (KIND_LOCATION, KIND_FLOOR, KIND_FLOOR4, KIND_PLACE, KIND_ROOMCHECK):
+    if not m or prev_kind not in (
+        KIND_LOCATION, KIND_FLOOR, KIND_FLOOR4, KIND_PLACE, KIND_ROOMCHECK, KIND_CHOOSE_F
+    ):
         return text
     n = m.group(1)
     if prev_kind in (KIND_PLACE, KIND_ROOMCHECK):
@@ -613,8 +819,19 @@ def _normalize_number_reply(prev_kind: str | None, text: str) -> str:
 def _apply_reply(extract: list[str], desc: list[str], prev_kind: str | None, text: str) -> None:
     """되묻기·요약 뒤에 온 사용자 메시지 하나를 추출용/상황용 목록에 반영."""
     text = _normalize_number_reply(prev_kind, text)
-    if prev_kind in (KIND_LOCATION, KIND_PROBLEM, KIND_OFFER, KIND_FLOOR, KIND_FLOOR4, KIND_PLACE, KIND_ROOMCHECK) and is_question_like(text):
+    if prev_kind in (
+        KIND_LOCATION, KIND_PROBLEM, KIND_OFFER, KIND_FLOOR, KIND_FLOOR4, KIND_PLACE, KIND_ROOMCHECK,
+        KIND_SPLIT, KIND_CHOOSE_B, KIND_CHOOSE_F, KIND_FACILITY,
+    ) and is_question_like(text):
         return  # 되묻기와 상관없는 질문 — 위치로도 상황으로도 쓰지 않음
+    if prev_kind in (KIND_SPLIT, KIND_CHOOSE_B, KIND_CHOOSE_F) and extract:
+        amb = find_ambiguity(extract[0])  # 첫 메시지 기준으로 같은 후보를 다시 구함 (대화를 재구성해도 같은 결과)
+        result = _resolve_ambiguity(amb, extract, desc, text) if amb else None
+        if result == "done":
+            return
+        if result in ("picked", "unsure"):
+            extract.append(f"{text} {CONFIRMED_MARK}" if result == "picked" else text)
+            return
     extract.append(text)
     if prev_kind == KIND_PROBLEM or prev_kind is None or _has_problem_text(text):
         desc.append(text)
@@ -625,6 +842,14 @@ def _message_kind(msg: MessageLike) -> str | None:
     if isinstance(payload, dict) and payload.get("kind"):
         return str(payload["kind"])
     content = msg.content  # 이전 버전·테스트 메시지: 고정 문구 표식으로 알아봄
+    if ASK_SPLIT in content:
+        return KIND_SPLIT
+    if "건물이 여러 곳 나왔어요" in content:
+        return KIND_CHOOSE_B
+    if "층이 여러 개 나왔어요" in content:
+        return KIND_CHOOSE_F
+    if "제가 아는 학교 시설에 없어요" in content:
+        return KIND_FACILITY
     if SUMMARY_MARKER in content:
         return KIND_SUMMARY
     if OFFER_MARKER in content:
@@ -674,6 +899,14 @@ def collect_draft(history: Sequence[MessageLike]) -> Draft:
                 add_ask(draft.asked, ASK_RMC)
             if prev_kind == KIND_PLACE:
                 add_ask(draft.asked, ASK_PLC)
+            if prev_kind in (KIND_SPLIT, KIND_CHOOSE_B, KIND_CHOOSE_F):
+                add_ask(draft.asked, ASK_AMB)
+            if prev_kind == KIND_CHOOSE_B:  # 건물을 고르게 한 것도 건물 되묻기 1번으로 셈
+                add_ask(draft.asked, ASK_LOC)
+            if prev_kind == KIND_CHOOSE_F:
+                add_ask(draft.asked, ASK_FLR)
+            if prev_kind == KIND_FACILITY:
+                add_ask(draft.asked, ASK_FAC)
     last_is_report_reply = bool(history) and (
         history[-1].intent == ChatIntent.REPORT and history[-1].role == ChatRole.ASSISTANT
     )
@@ -777,14 +1010,36 @@ def add_ask(asked: set[str], key: str) -> None:
     asked.add(key if n == 0 else f"{key}#{n + 1}")
 
 
+def _ambiguity_question(amb: Ambiguity) -> Question:
+    if amb.kind == "issues":
+        return Question(ASK_SPLIT, KIND_SPLIT, list(amb.options[:5]))
+    names = " / ".join(amb.options)
+    if amb.kind == "building":
+        return Question(
+            ASK_CHOOSE_BUILDING.format(names=names), KIND_CHOOSE_B,
+            [*amb.options, "잘 모르겠어요"], list(amb.options),
+        )
+    return Question(
+        ASK_CHOOSE_FLOOR.format(names=names), KIND_CHOOSE_F,
+        [*amb.options, "잘 모르겠어요"], list(amb.options),
+    )
+
+
 def next_question(
-    slots: ReportSlots, asked: set[str], unsure: bool = False, affirmed: bool = False
+    slots: ReportSlots,
+    asked: set[str],
+    unsure: bool = False,
+    affirmed: bool = False,
+    ambiguity: Ambiguity | None = None,
 ) -> Question | None:
     """빠진 필수 슬롯에 대한 질문. None이면 요약 단계로 가도 됨.
 
     빠진 게 있으면 물어본다: 건물을 못 알아들었으면 다시 묻고(최대 MAX_LOC_ASKS번), 학생이 마지막 답에서
     "모르겠어요"라고 하면(unsure) 그 항목은 더 묻지 않는다. 4층 확인은 1번만.
     """
+    # 여러 건이 섞였거나 건물·층 후보가 여럿이면 제일 먼저 — 다른 걸 묻기 전에 어느 건인지부터 정함 (최대 2번)
+    if ambiguity is not None and _count_asks(asked, ASK_AMB) < 2:
+        return _ambiguity_question(ambiguity)
     loc_asks = _count_asks(asked, ASK_LOC)
     if loc_asks < MAX_LOC_ASKS and not (unsure and loc_asks > 0):
         if slots.ambiguous_building:
@@ -802,17 +1057,21 @@ def next_question(
                 )
                 text = f"어느 건물의 {where}인가요?" if where else ASK_BUILDING_ONLY
                 return Question(text, ASK_LOC, list(LOCATION_CHOICES))
-            if slots.detail:  # 강의실·복도처럼 일반 장소 이름만 → 건물을 물음
-                return Question(
-                    ASK_LOCATION_GENERIC.format(detail=slots.detail), ASK_LOC,
-                    list(LOCATION_CHOICES),
-                )
+            if slots.detail:  # 강의실·복도처럼 일반 장소 이름만 → 건물을 물음 (엘리베이터는 층 없이 건물만)
+                ask = ASK_LOCATION_BUILDING_WIDE if slots.detail in BUILDING_WIDE else ASK_LOCATION_GENERIC
+                return Question(ask.format(detail=slots.detail), ASK_LOC, list(LOCATION_CHOICES))
             if slots.floor:  # 층만 알고 있음 → 건물만 물음
                 return Question(
                     f"어느 건물 {slots.floor}층인가요? (예: 혜인관 {slots.floor}층)", ASK_LOC,
                     list(LOCATION_CHOICES),
                 )
             return Question(ASK_LOCATION, ASK_LOC, list(LOCATION_CHOICES))
+    # 학교에 없다고 알려진 시설(수영장 등)을 말하면 한 번 확인 — "맞아요"라고 하면 그대로 받고 담당자가 다시 확인
+    if slots.unknown_facility and _count_asks(asked, ASK_FAC) < 1 and not affirmed:
+        name = slots.unknown_facility
+        return Question(
+            ASK_FACILITY.format(name=name), KIND_FACILITY, [f"{name} 맞아요", "잘 모르겠어요"], [name]
+        )
     # 4층이 없는 건물에서 4층이라고 하면 확인 — "맞아요"라고 하면 그대로, 층만 바꿔 말하면 그 층으로
     floor4_asks = _count_asks(asked, ASK_FL4)
     if (
@@ -854,6 +1113,8 @@ def next_question(
     if (
         slots.building
         and not slots.floor
+        and not slots.floor_unknown  # 층을 모른다고 이미 말함
+        and slots.detail not in BUILDING_WIDE  # 엘리베이터는 건물 전체 설비라 층을 묻지 않음
         and not slots.detail_specific
         and floor_asks < MAX_FLOOR_ASKS
         and not (unsure and floor_asks > 0)
@@ -925,13 +1186,21 @@ def build_summary(slots: ReportSlots, texts: Sequence[str], affirmed: bool = Fal
         )
     else:
         body = f"'{situation}' 문제이고, 위치는 담당자가 확인할게요."
-    note = ""
+    notes: list[str] = []
     if slots.floor_check and not affirmed:  # 없는 층인데 확인이 안 된 채로 넘어옴 → 숨기지 않고 말함
         label = cp.floor_label(slots.floor or "4")
-        note = f" 층은 정확히 이해하지 못해서 처음 말씀하신 {label}으로 적어 뒀어요."
+        notes.append(f"층은 정확히 이해하지 못해서 처음 말씀하신 {label}으로 적어 뒀어요.")
     elif slots.room_unlisted:
         room = (slots.detail or "").split("호")[0]
-        note = " " + ROOMCHECK_UNRESOLVED.format(room=room)
+        notes.append(ROOMCHECK_UNRESOLVED.format(room=room))
+    if slots.location_uncertain:  # 학생도 확실하지 않은 위치를 확정처럼 말하지 않음
+        notes.append("위치는 학생도 확실하지 않다고 하셔서 담당자가 다시 확인할게요.")
+    if slots.unknown_facility:  # 학교 시설 목록에 없는 시설을 말씀하신 대로 적어 둠
+        notes.append(
+            f"'{slots.unknown_facility}'은(는) 학교 시설 목록에서 확인하지 못해서 "
+            "말씀하신 대로 적어 뒀고, 담당자가 다시 확인할게요."
+        )
+    note = "".join(" " + n for n in notes)
     return f"정리해 볼게요. {body}{note} 이대로 {SUMMARY_MARKER}"
 
 
