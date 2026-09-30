@@ -359,6 +359,13 @@ def extract_slots(
         detail = outdoor
     else:
         detail = generic
+    # 호수로 층 추정 — 301호는 3층, 1201호는 12층 (층을 안 말했을 때, 또는 4층 없는 건물에서 4층이라고 했는데
+    # 호수가 다른 층을 가리킬 때)
+    if room:
+        inferred = str(int(room) // 100)
+        no_4th = bool(building and building in campus_rules()["no_4th_floor"])
+        if inferred != "0" and (not floor or (no_4th and floor == "4" and inferred != floor)):
+            floor = inferred
     category = _match_category(lowered)
 
     urgent = safety_concern or category == "안전" or any(w in lowered for w in URGENT_WORDS)

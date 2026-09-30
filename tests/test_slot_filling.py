@@ -54,7 +54,7 @@ REPORT, UNCLEAR = ChatIntent.REPORT, ChatIntent.UNCLEAR
         ("3동 2층 화장실 물이 계속 새요", "시설·설비", "3동 2층 화장실"),  # 없는 건물도 글자는 남김(되묻기)
         ("복도 조명이 깜빡거려요", "전기", "복도"),
         ("정문 근처 벤치가 부서져 있어요", "시설·설비", "정문"),
-        ("혜인관 301호 프로젝터가 안 켜져요", "IT·네트워크", "혜인관 301호"),
+        ("혜인관 301호 프로젝터가 안 켜져요", "IT·네트워크", "혜인관 3층 301호"),
         ("혜인관 열람실 와이파이가 안 터져요", "IT·네트워크", "혜인관 열람실"),
         ("청운관 지하1층 화장실 냄새가 너무 심해요", "청소·위생", "청운관 지하 1층 화장실"),
         ("계단이 미끄러워요", "안전", "계단"),
@@ -501,3 +501,15 @@ def test_summary_admits_unresolved_fourth_floor() -> None:
     slots = extract_slots("대일관 4층 복도 조명이 깜빡거려요")
     assert "이해하지 못해서 처음 말씀하신 4층" in build_summary(slots, ["x"])
     assert "이해하지 못해서" not in build_summary(slots, ["x"], affirmed=True)
+
+
+def test_room_number_implies_floor() -> None:
+    assert extract_slots("혜인관 301호 프로젝터가 안 켜져요").floor == "3"
+    assert extract_slots("혜인관 1201호 프로젝터가 안 켜져요").floor == "12"
+    assert extract_slots("혜인관 2층 301호 프로젝터가 안 켜져요").floor == "2"  # 층을 직접 말했으면 그대로
+    # 4층 없는 건물에서 4층이라고 했는데 호수가 다른 층이면 호수 기준 (확인 질문도 필요 없음)
+    slots = extract_slots("북악관 4층 에어컨이 안 나와요\n301호")
+    assert slots.floor == "3" and not slots.floor_check
+    # 호수가 4xx면 4층 그대로 (건물에 4층이 없으면 확인)
+    assert extract_slots("북악관 401호 에어컨이 안 나와요").floor_check
+    assert next_question(extract_slots("혜인관 301호 프로젝터가 안 켜져요"), set()) is None  # 층을 또 묻지 않음

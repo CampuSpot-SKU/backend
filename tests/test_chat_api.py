@@ -736,3 +736,25 @@ def test_fourth_floor_affirmed_earlier_is_not_asked_again(client: TestClient) ->
     summary = send(client, sid, "복도").json()
     assert summary["confirm_required"] is True
     assert "4층이 없는 걸로" not in summary["summary"] and "이해하지 못해서" not in summary["summary"]
+
+
+def test_room_number_fills_floor_without_asking(client: TestClient) -> None:
+    """"301호"라고만 해도 3층으로 이해 — 층을 다시 묻지 않음."""
+    sid = new_session(client)
+    begin(client, sid, "강의실 와이파이가 안 터져요")
+    room = send(client, sid, "혜인관").json()
+    assert "몇 층" in room["follow_up_question"] or "몇 호" in room["follow_up_question"]
+    summary = send(client, sid, "301호").json()
+    assert summary["confirm_required"] is True
+    assert summary["slots_filled"]["floor"] == "3"
+    assert "혜인관 3층 301호 강의실" in summary["summary"]
+
+
+def test_room_number_corrects_fourth_floor_in_building_without_one(client: TestClient) -> None:
+    sid = new_session(client)
+    begin(client, sid, "4층 에어컨이 안나와요")
+    floor4 = send(client, sid, "북악관").json()
+    assert "4층이 없는 걸로 알고 있어요" in floor4["follow_up_question"]
+    summary = send(client, sid, "301호").json()  # 층 대신 호수로 답 → 3층
+    assert summary["confirm_required"] is True and summary["slots_filled"]["floor"] == "3"
+    assert "이해하지 못해서" not in summary["summary"]
