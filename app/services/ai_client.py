@@ -88,3 +88,30 @@ def say_text(kind: str, base_text: str, must_include: list[str], history: list[H
         logger.info("말투 다듬기 실패 → 고정 문구 사용 (%s): %s", kind, e)
         return base_text
     return text if text and all(m in text for m in must_include) else base_text
+
+
+JUDGE_TIMEOUT_SECONDS = 10.0  # 판정은 실패해도 규칙 기반으로 대체되므로 오래 기다리지 않음
+
+
+class JudgeResult(BaseModel):
+    """ai `POST /api/v1/report/judge` 응답 (1-3b)."""
+
+    category: str
+    impact: Literal["high", "low"]
+    urgency: Literal["high", "low"]
+    problem_stated: bool
+    reason: str
+
+
+def judge_report(text: str, location: str | None, categories: list[str]) -> JudgeResult:
+    """신고 내용의 카테고리·영향도·긴급도·이유를 AI가 판정. 실패하면 AiServiceError (호출한 쪽이 규칙 기반으로 대체)."""
+    url = _endpoint("/report/judge")
+    payload = {"text": text[:2000], "location": location, "categories": categories}
+    headers = {"X-Internal-Secret": get_settings().ai_service_secret}
+    try:
+        res = httpx.post(url, json=payload, headers=headers, timeout=JUDGE_TIMEOUT_SECONDS)
+        res.raise_for_status()
+        return JudgeResult.model_validate(res.json())
+    except (httpx.HTTPError, ValidationError, ValueError) as e:
+        logger.warning("ai report judge 실패: %s", e)
+        raise AiServiceError(str(e)) from e

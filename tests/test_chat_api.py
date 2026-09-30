@@ -25,8 +25,8 @@ from app.db.session import get_engine, get_sessionmaker
 from app.main import app
 from app.models import Building, Report, ReportStatusHistory
 from app.models.enums import ReportStatus
-from app.routers.chat import get_intent_classifier, get_phraser
-from app.services.ai_client import AiServiceError, HistoryItem, IntentResult
+from app.routers.chat import get_intent_classifier, get_judger, get_phraser
+from app.services.ai_client import AiServiceError, HistoryItem, IntentResult, JudgeResult
 
 # 문장 → 가짜 의도분류 결과 (명세서 4-4 few-shot과 같은 판정)
 FAKE: dict[str, IntentResult] = {
@@ -54,7 +54,26 @@ FAKE: dict[str, IntentResult] = {
     "3층 정수기가 고장났어요": IntentResult(intent="report", report_score=90, inquiry_score=10),
     "혜인관 7층 화장실 물이 새요": IntentResult(intent="report", report_score=93, inquiry_score=7),
     "스포렉스 샤워실 온수가 안 나와요": IntentResult(intent="report", report_score=90, inquiry_score=10),
+    "혜인관 2층 화장실 콘센트에서 연기가 나요": IntentResult(intent="report", report_score=95, inquiry_score=5),
 }
+
+# 가짜 AI 판정 — result가 None이면 AI 실패(AiServiceError)로 규칙 기반 대체 경로를 탐
+JUDGE: dict[str, Any] = {"result": None, "calls": []}
+
+
+def fake_judger(text: str, location: str | None, categories: list[str]) -> JudgeResult:
+    JUDGE["calls"].append({"text": text, "location": location, "categories": categories})
+    if JUDGE["result"] is None:
+        raise AiServiceError("ai judge down")
+    return JUDGE["result"]  # type: ignore[no-any-return]
+
+
+@pytest.fixture()
+def ai_judge() -> Iterator[dict[str, Any]]:
+    """테스트 안에서 JUDGE["result"]를 정하고, 끝나면 원래대로(AI 실패) 되돌림."""
+    JUDGE["calls"] = []
+    yield JUDGE
+    JUDGE["result"] = None
 
 
 def fake_classifier(text: str, history: list[HistoryItem]) -> IntentResult:
@@ -69,6 +88,7 @@ def client() -> Iterator[TestClient]:
     get_engine.cache_clear()
     get_sessionmaker.cache_clear()
     app.dependency_overrides[get_intent_classifier] = lambda: fake_classifier
+    app.dependency_overrides[get_judger] = lambda: fake_judger
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
@@ -823,3 +843,48 @@ def test_off_topic_is_blocked_and_repeats_differ(client: TestClient) -> None:
     assert first and second and third
     assert len({first, second, third}) == 3  # 같은 문장 반복 금지
     assert len(second) <= len(first) + 10 and "신고" in second  # 두 번째부터는 짧고 단호, 할 수 있는 일은 안내
+
+
+# ── AI 판정 (작업 1-3b) ──────────────────────────────────────────────────────
+def test_ai_judgement_sets_priority_category_and_reason(
+    client: TestClient, ai_judge: dict[str, Any]
+) -> None:
+    ai_judge["result"] = JudgeResult(
+        category="안전", impact="high", urgency="high", problem_stated=True,
+        reason="바닥이 젖어 여러 학생이 미끄러질 위험이 있어 보여요.",
+    )
+    sid = new_session(client)
+    summary = begin(client, sid, "혜인관 2층 화장실 물이 계속 새요")
+    assert summary["confirm_required"] is True
+    assert summary["slots_filled"]["category"] == "안전"  # 요약 단계부터 AI 카테고리
+    done = send(client, sid, "접수").json()
+    assert done["report"]["category"]["name"] == "안전"
+    assert done["report"]["priority"] == "P1"  # 매트릭스: 영향도 고 × 긴급도 고
+    assert "바닥이 젖어 여러 학생이 미끄러질 위험이 있어 보여요. 그래서 P1로 판단했어요." in done["message"]
+    call = ai_judge["calls"][-1]  # ai에는 학교 데이터로 확인된 위치와 DB의 카테고리 이름이 감
+    assert call["location"] == "혜인관 2층 화장실" and "안전" in call["categories"]
+
+
+def test_ai_failure_falls_back_to_rule_based_judgement(
+    client: TestClient, ai_judge: dict[str, Any]
+) -> None:
+    ai_judge["result"] = None  # AI 판정 실패
+    sid = new_session(client)
+    begin(client, sid, "혜인관 2층 화장실 물이 계속 새요")
+    done = send(client, sid, "접수").json()
+    assert done["report_created"] is True  # 접수는 막히지 않음
+    assert done["report"]["priority"] == "P2" and done["report"]["category"]["name"] == "시설·설비"
+    assert "여러 사람이 쓰는 공간이고 급한 위험 신호는 없어 P2로 판단했어요." in done["message"]
+
+
+def test_emergency_words_keep_urgency_high_even_if_ai_says_low(
+    client: TestClient, ai_judge: dict[str, Any]
+) -> None:
+    ai_judge["result"] = JudgeResult(
+        category="전기", impact="high", urgency="low", problem_stated=True, reason="급하지 않아 보여요."
+    )
+    sid = new_session(client)
+    begin(client, sid, "혜인관 2층 화장실 콘센트에서 연기가 나요")
+    done = send(client, sid, "접수").json()
+    assert done["report"]["priority"] == "P1"
+    assert "급하지 않아 보여요" not in done["message"]  # 모순되는 AI 이유는 버림

@@ -51,10 +51,12 @@ from app.services.ai_client import (
     AiServiceError,
     HistoryItem,
     IntentResult,
+    JudgeResult,
     classify_intent,
+    judge_report,
     say_text,
 )
-from app.services.report_service import create_report, load_buildings
+from app.services.report_service import create_report, load_buildings, load_category_names
 from app.services.slot_filling import (
     ASK_EDIT,
     CANCELLED,
@@ -72,6 +74,7 @@ from app.services.slot_filling import (
     Draft,
     ReportSlots,
     apply_form,
+    apply_judgement,
     build_offer,
     build_summary,
     collect_draft,
@@ -101,12 +104,20 @@ INQUIRY_PLACEHOLDER = (
 IntentClassifier = Callable[[str, list[HistoryItem]], IntentResult]
 # (종류, 기본 문구, 남아 있어야 할 표현, 최근 대화) → 말투를 다듬은 문구. 실패하면 기본 문구
 Phraser = Callable[[str, str, list[str], list[HistoryItem]], str]
+# (신고 내용, 확인된 위치, 카테고리 이름들) → AI 판정 (1-3b). 실패하면 AiServiceError
+Judger = Callable[[str, str | None, list[str]], JudgeResult]
 Phrase = Callable[[str, str, list[str]], str]  # 대화 맥락을 미리 채운 형태
+Judge = Callable[[ReportSlots, str], ReportSlots]  # 규칙으로 뽑은 슬롯 → AI 판정을 반영한 슬롯
 
 
 def get_intent_classifier() -> IntentClassifier:
     """테스트에서 app.dependency_overrides로 가짜 분류기로 바꿔 끼우기 위한 의존성."""
     return classify_intent
+
+
+def get_judger() -> Judger:
+    """테스트에서 app.dependency_overrides로 가짜 판정기로 바꿔 끼우기 위한 의존성."""
+    return judge_report
 
 
 def get_phraser() -> Phraser:
@@ -118,6 +129,7 @@ def get_phraser() -> Phraser:
 DbSession = Annotated[Session, Depends(get_db)]
 Classifier = Annotated[IntentClassifier, Depends(get_intent_classifier)]
 PhraserDep = Annotated[Phraser, Depends(get_phraser)]
+JudgerDep = Annotated[Judger, Depends(get_judger)]
 
 
 @router.post("/sessions", response_model=SessionCreated, status_code=201)
@@ -190,6 +202,7 @@ def send_message(
     db: DbSession,
     classify: Classifier,
     phraser: PhraserDep,
+    judger: JudgerDep,
 ) -> ChatReply | StreamingResponse:
     if db.get(ChatSession, session_id) is None:
         raise HTTPException(status_code=404, detail="대화 세션을 찾을 수 없어요.")
@@ -206,6 +219,9 @@ def send_message(
 
     def phrase(kind: str, base: str, must: list[str]) -> str:
         return phraser(kind, base, must, say_history)
+
+    def judge(slots: ReportSlots, judged_text: str) -> ReportSlots:
+        return _judged(db, slots, judged_text, judger)
 
     # 0) 접수 완료 직후의 인사·확인성 짧은 답 → 새 신고로 시작하지 않고 마무리 한 줄 (명세 4-1 보완 ②)
     if (
@@ -245,7 +261,7 @@ def send_message(
                 texts, descs = draft.with_reply(text)
             return _report_step(
                 db, session_id, user_msg, texts, descs, draft.asked, draft.safety_concern,
-                phrase, intro=True,
+                phrase, intro=True, judge=judge,
             )
         if draft.confirming and action is None and is_edit(text) and not is_confirm(text):
             return _ask_edit(db, session_id, user_msg, draft, phrase)
@@ -255,14 +271,16 @@ def send_message(
         if action == "confirm_report" and not draft.in_progress:
             # 화면이 오래돼 서버엔 진행 중인 신고가 없음 → 폼에 적힌 내용으로 새로 시작해 요약부터
             texts = [t for t in [(body.draft.description if body.draft else None)] if t]
-            return _report_step(db, session_id, user_msg, texts, texts, set(), False, phrase)
+            return _report_step(
+                db, session_id, user_msg, texts, texts, set(), False, phrase, judge=judge
+            )
         if confirm:
             texts, descs = list(draft.user_texts), list(draft.desc_texts)
         else:
             texts, descs = draft.with_reply(text)  # 위치 답변·질문은 상황에서 빼는 규칙 적용
         return _report_step(
             db, session_id, user_msg, texts, descs, draft.asked, draft.safety_concern, phrase,
-            confirm=confirm, form=body.draft if confirm else None,
+            confirm=confirm, form=body.draft if confirm else None, judge=judge,
         )
 
     # 2) 의도분류 (ai 서비스)
@@ -397,6 +415,7 @@ def _report_step(
     safety_concern: bool,
     phrase: Phrase,
     *,
+    judge: Judge,
     intro: bool = False,  # 접수 제안에 "응"이라고 답한 직후 — "필요한 정보를 물어볼게요."로 시작
     confirm: bool = False,
     form: DraftIn | None = None,
@@ -412,8 +431,10 @@ def _report_step(
     if confirm:
         if form is not None:
             slots = apply_form(slots, form.building, form.floor, form.detail, buildings, judged)
+        slots = judge(slots, judged)  # 최종 위치 기준으로 AI가 카테고리·영향도·긴급도·이유 판정
         return _create(db, session_id, user_msg, slots, form_desc or described or joined)
 
+    slots = judge(slots, judged)  # AI 판정 (실패하면 규칙 기반 값 그대로) — 상황을 말했는지도 여기서 판단
     # 학생이 마지막 답에서 "모르겠어요"라고 했으면 그 항목은 다시 묻지 않음
     unsure = bool(texts) and any(w in texts[-1] for w in UNKNOWN_WORDS)
     affirmed = any("맞" in t for t in texts)  # "4층이 맞아요" 같은 확인
@@ -446,6 +467,16 @@ def _report_step(
         slots_filled=_slots_filled(slots, described),
         choices=list(SUMMARY_CHOICES),
     )
+
+
+def _judged(db: Session, slots: ReportSlots, text: str, judger: Judger) -> ReportSlots:
+    """규칙으로 뽑은 슬롯에 AI 판정을 덮어씀 (1-3b). AI가 실패하면 규칙 기반 값을 그대로 씀 (명세 11장)."""
+    try:
+        result = judger(text, slots.location_text, load_category_names(db))
+    except AiServiceError as e:
+        logger.warning("AI 판정 실패 → 규칙 기반 판정 사용: %s", e)
+        return slots
+    return apply_judgement(slots, result, text)
 
 
 def _create(

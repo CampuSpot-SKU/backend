@@ -26,6 +26,11 @@ def load_buildings(db: Session) -> list[BuildingRef]:
     return [BuildingRef(id=b.id, name=b.name, aliases=tuple(b.aliases or ())) for b in rows]
 
 
+def load_category_names(db: Session) -> list[str]:
+    """AI가 고를 수 있는 카테고리 이름들 (사용 중인 것만) — 학교마다 달라질 수 있어 하드코딩하지 않음."""
+    return list(db.scalars(select(Category.name).where(Category.is_active.is_(True))).all())
+
+
 def _category(db: Session, name: str | None) -> Category:
     for n in (name, DEFAULT_CATEGORY):
         if n is None:

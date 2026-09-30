@@ -135,6 +135,10 @@ URGENT_WORDS = ("누전", "감전", "스파크", "불꽃", "화재", "불이 났
                 "미끄", "추락", "낙하", "떨어질", "붕괴", "무너", "갇혔", "갇혀", "침수", "물이 넘",
                 "깨진 유리", "유리가 깨", "위험", "다쳤", "다칠", "부상", "안전")
 
+# AI 판정이 긴급도 "저"라고 해도 이 표현이 있으면 "고"로 올림 (놓치면 안 되는 안전 신호의 하한선, 1-3b)
+EMERGENCY_WORDS = ("누전", "감전", "스파크", "불꽃", "화재", "불이 났", "불이 난", "불났", "불 났", "불 난",
+                   "불길", "폭발", "연기", "가스", "타는 냄새", "갇혔", "갇혀", "침수")
+
 # 영향도 판정용 (명세서 3-1: 높음=다수 이용 공용공간, 낮음=개인·소수 공간)
 PRIVATE_PLACES = ("연구실", "사무실", "교수실", "호실", "내 방", "우리 방", "사물함", "개인")
 
@@ -198,6 +202,8 @@ class ReportSlots:
     room_unlisted: bool = False  # 그 층에 없는 호수라고 함 (데이터가 불완전할 수 있어 확인 후 그대로 접수)
     # 학교 건물 목록에 없는 이름("3동", "공학관")을 말한 경우 — 건물로 받지 않고 되물음 (building은 비움)
     unknown_place: str | None = None
+    # AI 판정 이유 한 줄 (1-3b) — AI 판정이 없거나 실패하면 None (그러면 규칙 기반 문구를 씀)
+    reason: str | None = None
 
     @property
     def has_location(self) -> bool:
@@ -471,6 +477,47 @@ def extract_slots(
         unknown_place=None if building else unknown_place,
         floor_check=floor_check,
         room_unlisted=room_unlisted,
+    )
+
+
+class JudgementLike(Protocol):
+    """ai 서비스 판정 결과 (app.services.ai_client.JudgeResult) 중 여기서 쓰는 필드."""
+
+    @property
+    def category(self) -> str: ...
+    @property
+    def impact(self) -> str: ...  # "high" | "low"
+    @property
+    def urgency(self) -> str: ...
+    @property
+    def problem_stated(self) -> bool: ...
+    @property
+    def reason(self) -> str: ...
+
+
+def apply_judgement(slots: ReportSlots, judgement: JudgementLike | None, text: str) -> ReportSlots:
+    """AI 판정(카테고리·영향도·긴급도·상황 언급 여부·이유)으로 규칙 기반 값을 덮어쓴다 (작업 1-3b, 명세 3-1).
+
+    judgement가 None(AI 실패)이면 규칙 기반 값을 그대로 둔다. 위치(building·floor·detail)는 건드리지 않는다 —
+    위치는 학교 데이터로 검증하는 코드가 담당. 두 가지 안전장치:
+    - 위치를 전혀 모르면 영향도는 AI가 뭐라 해도 "저" (규칙과 동일)
+    - 긴급 표현(EMERGENCY_WORDS)이 있는데 AI가 긴급도 "저"라 하면 "고"로 올리고, 이유 문장은 버림 (모순 방지)
+    """
+    if judgement is None:
+        return slots
+    lowered = text.lower()
+    urgency = Level.HIGH if judgement.urgency == "high" else Level.LOW
+    reason: str | None = judgement.reason
+    if urgency == Level.LOW and any(w in lowered for w in EMERGENCY_WORDS):
+        urgency, reason = Level.HIGH, None
+    impact = Level.HIGH if judgement.impact == "high" and slots.location_text else Level.LOW
+    return replace(
+        slots,
+        category=judgement.category,
+        has_problem=judgement.problem_stated,
+        impact=impact,
+        urgency=urgency,
+        reason=reason,
     )
 
 
@@ -889,7 +936,9 @@ def build_summary(slots: ReportSlots, texts: Sequence[str], affirmed: bool = Fal
 
 
 def judge_reason(slots: ReportSlots, priority: str) -> str:
-    """접수 완료 메시지에 붙이는 판정 이유 한 줄 (명세 4-1). 지금은 규칙 기반 — 1-3b에서 AI 판정으로 교체."""
+    """접수 완료 메시지에 붙이는 판정 이유 한 줄 (명세 4-1). AI 이유가 있으면 그걸 쓰고, 없으면 규칙 기반 문구."""
+    if slots.reason:
+        return f"{slots.reason} 그래서 {priority}로 판단했어요."
     impact = "여러 사람이 쓰는 공간이고" if slots.impact == Level.HIGH else "개인 공간이거나 위치가 불분명하고"
     urgency = "안전 위험 신호가 있어" if slots.urgency == Level.HIGH else "급한 위험 신호는 없어"
     return f"{impact} {urgency} {priority}로 판단했어요."

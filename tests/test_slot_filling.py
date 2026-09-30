@@ -17,6 +17,7 @@ from app.services.slot_filling import (
     SUMMARY_MARKER,
     BuildingRef,
     apply_form,
+    apply_judgement,
     build_offer,
     build_summary,
     collect_draft,
@@ -610,3 +611,57 @@ def test_light_out_expression_counts_as_problem() -> None:
     # "불이 나갔어요"는 조명 문제 — 상황을 아는 문장이라 "어떤 문제인가요?"를 되묻지 않음
     slots = extract_slots("북악관 3층 복도 불이 나갔어요")
     assert slots.has_problem and slots.category == "전기"
+
+
+# ── AI 판정 반영 (작업 1-3b) ─────────────────────────────────────────────────
+@dataclass
+class FakeJudgement:
+    category: str = "시설·설비"
+    impact: str = "high"
+    urgency: str = "low"
+    problem_stated: bool = True
+    reason: str = "여러 학생이 쓰는 화장실이지만 당장 위험하지는 않아 보여요."
+
+
+def test_judgement_none_keeps_rule_based_values() -> None:
+    slots = extract_slots("혜인관 2층 화장실 물이 계속 새요")
+    assert apply_judgement(slots, None, "혜인관 2층 화장실 물이 계속 새요") == slots
+
+
+def test_judgement_overrides_category_impact_urgency_and_reason() -> None:
+    text = "혜인관 2층 화장실 물이 계속 새요"
+    slots = apply_judgement(
+        extract_slots(text),
+        FakeJudgement(category="안전", impact="high", urgency="high", reason="바닥이 젖어 위험해 보여요."),
+        text,
+    )
+    assert slots.category == "안전" and slots.impact == Level.HIGH and slots.urgency == Level.HIGH
+    assert slots.building == "혜인관" and slots.floor == "2"  # 위치는 규칙(학교 데이터 검증)이 그대로
+    assert judge_reason(slots, "P1") == "바닥이 젖어 위험해 보여요. 그래서 P1로 판단했어요."
+
+
+def test_judgement_impact_is_low_when_location_unknown() -> None:
+    text = "물이 새요"
+    slots = apply_judgement(extract_slots(text), FakeJudgement(impact="high"), text)
+    assert slots.impact == Level.LOW  # 위치를 전혀 모르면 AI가 high라 해도 저
+
+
+def test_emergency_word_raises_urgency_and_drops_contradicting_reason() -> None:
+    text = "북악관 3층 강의실 콘센트에서 연기가 나요"
+    slots = apply_judgement(extract_slots(text), FakeJudgement(urgency="low"), text)
+    assert slots.urgency == Level.HIGH and slots.reason is None
+    assert "안전 위험 신호가 있어" in judge_reason(slots, "P1")  # 규칙 기반 문구로 대체
+
+
+def test_judgement_problem_stated_false_means_ask_problem() -> None:
+    text = "혜인관 2층 화장실 상태가 그래요"
+    slots = apply_judgement(extract_slots(text), FakeJudgement(problem_stated=False), text)
+    assert not slots.has_problem
+    question = next_question(slots, set())
+    assert question is not None and question.key == ASK_PROB
+
+
+def test_judge_reason_falls_back_to_rules_without_ai_reason() -> None:
+    slots = extract_slots("혜인관 2층 화장실 물이 계속 새요")
+    assert slots.reason is None
+    assert judge_reason(slots, "P2") == "여러 사람이 쓰는 공간이고 급한 위험 신호는 없어 P2로 판단했어요."
