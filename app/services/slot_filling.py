@@ -456,8 +456,23 @@ def _has_problem_text(text: str) -> bool:
     return _match_category(text.lower()) is not None or any(w in text for w in PROBLEM_WORDS)
 
 
+_BARE_NUMBER_RE = re.compile(r"\s*(\d{1,4})\s*(?:번|층|호)?\s*(?:이에요|이요|요|입니다|에요)?\s*[.!~]*\s*")
+
+
+def _normalize_number_reply(prev_kind: str | None, text: str) -> str:
+    """"3"처럼 숫자만 답한 걸 직전 질문에 맞춰 "3층"/"301호"로 이해 (층·건물·4층 확인 질문 뒤엔 층, 장소 질문 뒤엔 호수)."""
+    m = _BARE_NUMBER_RE.fullmatch(text)
+    if not m or prev_kind not in (KIND_LOCATION, KIND_FLOOR, KIND_FLOOR4, KIND_PLACE):
+        return text
+    n = m.group(1)
+    if prev_kind == KIND_PLACE:
+        return f"{n}호" if len(n) >= 3 else text
+    return f"{n}층" if len(n) <= 2 else f"{n}호"
+
+
 def _apply_reply(extract: list[str], desc: list[str], prev_kind: str | None, text: str) -> None:
     """되묻기·요약 뒤에 온 사용자 메시지 하나를 추출용/상황용 목록에 반영."""
+    text = _normalize_number_reply(prev_kind, text)
     if prev_kind in (KIND_LOCATION, KIND_PROBLEM, KIND_OFFER, KIND_FLOOR, KIND_FLOOR4, KIND_PLACE) and is_question_like(text):
         return  # 되묻기와 상관없는 질문 — 위치로도 상황으로도 쓰지 않음
     extract.append(text)
@@ -648,6 +663,11 @@ def next_question(
                     ASK_LOCATION_GENERIC.format(detail=slots.detail), ASK_LOC,
                     list(LOCATION_CHOICES),
                 )
+            if slots.floor:  # 층만 알고 있음 → 건물만 물음
+                return Question(
+                    f"어느 건물 {slots.floor}층인가요? (예: 혜인관 {slots.floor}층)", ASK_LOC,
+                    list(LOCATION_CHOICES),
+                )
             return Question(ASK_LOCATION, ASK_LOC, list(LOCATION_CHOICES))
     # 4층이 없는 건물에서 4층이라고 하면 확인 — "맞아요"라고 하면 그대로, 층만 바꿔 말하면 그 층으로
     floor4_asks = _count_asks(asked, ASK_FL4)
@@ -710,7 +730,10 @@ def build_offer(text: str) -> str:
     )
 
 
-def build_summary(slots: ReportSlots, texts: Sequence[str]) -> str:
+FLOOR4_UNRESOLVED = "층은 정확히 이해하지 못해서 처음 말씀하신 4층으로 적어 뒀어요."
+
+
+def build_summary(slots: ReportSlots, texts: Sequence[str], affirmed: bool = False) -> str:
     """접수 직전 확인 문구 — 목록이 아니라 문장 하나. SUMMARY_MARKER를 포함해야 이전 버전 재구성에서도 인식됨."""
     situation = _one_line(" ".join(texts)) if slots.has_problem else "내용은 아직 확인이 안 됐어요"
     if slots.location_text and not (slots.unknown_place and not slots.building):
@@ -722,7 +745,10 @@ def build_summary(slots: ReportSlots, texts: Sequence[str]) -> str:
         )
     else:
         body = f"'{situation}' 문제이고, 위치는 담당자가 확인할게요."
-    return f"정리해 볼게요. {body} 이대로 {SUMMARY_MARKER}"
+    note = ""
+    if slots.floor_check and not affirmed:  # 4층 없는 건물인데 확인이 안 된 채로 넘어옴 → 숨기지 않고 말함
+        note = f" {FLOOR4_UNRESOLVED}"
+    return f"정리해 볼게요. {body}{note} 이대로 {SUMMARY_MARKER}"
 
 
 def judge_reason(slots: ReportSlots, priority: str) -> str:

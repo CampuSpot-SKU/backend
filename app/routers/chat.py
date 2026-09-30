@@ -405,7 +405,7 @@ def _report_step(
 
     # 학생이 마지막 답에서 "모르겠어요"라고 했으면 그 항목은 다시 묻지 않음
     unsure = bool(texts) and any(w in texts[-1] for w in UNKNOWN_WORDS)
-    affirmed = bool(texts) and "맞" in texts[-1]  # "4층이 맞아요" 같은 확인
+    affirmed = any("맞" in t for t in texts)  # "4층이 맞아요" 같은 확인
     question = next_question(slots, asked, unsure, affirmed)
     if question is not None:
         base = (INTRO if intro else "") + question.text
@@ -421,8 +421,10 @@ def _report_step(
         )
 
     # 필수 항목이 찼거나 같은 질문을 이미 했음 → 바로 접수하지 않고 문장으로 확인
-    base = build_summary(slots, descs)
+    base = build_summary(slots, descs, affirmed)
     must = [t for t in [slots.location_text] if t and t in base] + ["접수"]
+    if slots.floor_check and not affirmed:
+        must.append("4층")
     summary = phrase(KIND_SUMMARY, base, must)
     reply = _add_message(db, session_id, ChatRole.ASSISTANT, summary, _after(user_msg), KIND_SUMMARY)
     reply.intent = ChatIntent.REPORT

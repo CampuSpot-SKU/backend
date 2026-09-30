@@ -483,3 +483,21 @@ def test_room_and_place_questions() -> None:
     # 모른다고 하면 중단, 최대 2번
     assert next_question(slots, {"place"}, unsure=True) is None
     assert next_question(slots, {"place", "place#2"}) is None
+
+
+def test_bare_number_reply_follows_previous_question() -> None:
+    def history(kind_text: str) -> list[Msg]:
+        return [Msg(U, "4층 에어컨이 안나와요", REPORT), Msg(A, kind_text, REPORT, debug_payload={"kind": kind_text})]
+
+    assert collect_draft(history("floor4")).with_reply("3")[0][-1] == "3층"
+    assert collect_draft(history("location")).with_reply("2")[0][-1] == "2층"
+    assert collect_draft(history("floor")).with_reply("3층이요")[0][-1] == "3층"
+    assert collect_draft(history("place")).with_reply("301")[0][-1] == "301호"
+    assert collect_draft(history("place")).with_reply("3")[0][-1] == "3"  # 장소 질문에 한 자리 숫자는 호수가 아님
+    assert collect_draft(history("problem")).with_reply("3")[0][-1] == "3"  # 다른 질문엔 손대지 않음
+
+
+def test_summary_admits_unresolved_fourth_floor() -> None:
+    slots = extract_slots("대일관 4층 복도 조명이 깜빡거려요")
+    assert "이해하지 못해서 처음 말씀하신 4층" in build_summary(slots, ["x"])
+    assert "이해하지 못해서" not in build_summary(slots, ["x"], affirmed=True)

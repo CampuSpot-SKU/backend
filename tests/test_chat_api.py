@@ -44,6 +44,7 @@ FAKE: dict[str, IntentResult] = {
     "은주관 3층 화장실 물이 새요": IntentResult(intent="report", report_score=92, inquiry_score=8),
     "대일관 4층 복도 조명이 깜빡거려요": IntentResult(intent="report", report_score=90, inquiry_score=10),
     "강의실 와이파이가 안 터져요": IntentResult(intent="report", report_score=88, inquiry_score=12),
+    "4층 에어컨이 안나와요": IntentResult(intent="report", report_score=90, inquiry_score=10),
     "3층 정수기가 고장났어요": IntentResult(intent="report", report_score=90, inquiry_score=10),
     "혜인관 7층 화장실 물이 새요": IntentResult(intent="report", report_score=93, inquiry_score=7),
     "스포렉스 샤워실 온수가 안 나와요": IntentResult(intent="report", report_score=90, inquiry_score=10),
@@ -281,7 +282,7 @@ def test_location_answer_is_not_added_to_description(client: TestClient) -> None
 def test_question_reply_to_location_ask_is_ignored(client: TestClient) -> None:
     sid = new_session(client)
     first = begin(client, sid, "3층 정수기가 고장났어요")
-    assert first["follow_up_question"].startswith("필요한 정보를 물어볼게요. 어디에서")
+    assert first["follow_up_question"].startswith("필요한 정보를 물어볼게요. 어느 건물 3층인가요?")
     second = send(client, sid, "3동이 우리학교에 있어?").json()
     # 질문은 위치로도 상황으로도 쓰지 않음 (없는 건물 "3동"이 채워지면 안 됨) → 건물을 아직 모르니 다시 물음
     assert "confirm_required" not in second
@@ -431,7 +432,7 @@ def test_generic_place_name_only_asks_for_building(client: TestClient) -> None:
 def test_floor_only_asks_location_once_then_summarizes(client: TestClient) -> None:
     sid = new_session(client)
     first = begin(client, sid, "3층 정수기가 고장났어요")
-    assert first["follow_up_question"].startswith("필요한 정보를 물어볼게요. 어디에서")
+    assert first["follow_up_question"].startswith("필요한 정보를 물어볼게요. 어느 건물 3층인가요?")
     second = send(client, sid, "모르겠어요").json()
     assert second["confirm_required"] is True  # 같은 질문은 1번만
     assert second["slots_filled"]["building"] is None
@@ -698,3 +699,40 @@ def test_place_choice_corridor_replaces_room_question(client: TestClient) -> Non
     body = send(client, sid, "복도").json()  # 강의실이 아니라 복도 — 호수를 더 안 물음
     assert body["confirm_required"] is True
     assert body["slots_filled"]["detail"] == "복도"
+
+
+def test_bare_number_answer_is_understood_as_floor(client: TestClient) -> None:
+    """"3"만 답해도 직전 질문(층)에 대한 답으로 3층으로 이해 — 같은 질문을 반복하면 안 됨."""
+    sid = new_session(client)
+    ask = begin(client, sid, "4층 에어컨이 안나와요")
+    assert "어느 건물 4층인가요?" in ask["follow_up_question"]  # 층을 이미 알면 건물만 물음
+    floor4 = send(client, sid, "북악관").json()
+    assert "4층이 없는 걸로 알고 있어요" in floor4["follow_up_question"]
+    nxt = send(client, sid, "3").json()
+    assert nxt["slots_filled"]["floor"] == "3"
+    assert "4층이 없는 걸로" not in nxt["follow_up_question"]
+    assert "어떤 장소인가요?" in nxt["follow_up_question"]
+    summary = send(client, sid, "복도").json()
+    assert "북악관 3층 복도" in summary["summary"] and "이해하지 못해서" not in summary["summary"]
+
+
+def test_unresolved_fourth_floor_is_stated_honestly_in_summary(client: TestClient) -> None:
+    """층 확인이 끝내 안 되면 4층으로 두되, 이해하지 못해서 그렇게 적었다고 요약에서 밝힘."""
+    sid = new_session(client)
+    begin(client, sid, "4층 에어컨이 안나와요")
+    send(client, sid, "북악관")
+    send(client, sid, "어")
+    send(client, sid, "어")
+    summary = send(client, sid, "복도").json()
+    assert summary["confirm_required"] is True and summary["slots_filled"]["floor"] == "4"
+    assert "층은 정확히 이해하지 못해서 처음 말씀하신 4층으로 적어 뒀어요." in summary["summary"]
+
+
+def test_fourth_floor_affirmed_earlier_is_not_asked_again(client: TestClient) -> None:
+    sid = new_session(client)
+    begin(client, sid, "4층 에어컨이 안나와요")
+    send(client, sid, "북악관")
+    send(client, sid, "4층이 맞아요")
+    summary = send(client, sid, "복도").json()
+    assert summary["confirm_required"] is True
+    assert "4층이 없는 걸로" not in summary["summary"] and "이해하지 못해서" not in summary["summary"]
