@@ -17,7 +17,7 @@ from slowapi.errors import RateLimitExceeded
 from app.db.session import check_db
 from app.middleware.request_id import RequestIdMiddleware, setup_logging
 from app.rate_limit import limiter, rate_limit_exceeded_handler
-from app.routers import admin, chat, cron, reports
+from app.routers import admin, chat, cron, locations, reports
 
 setup_logging()
 
@@ -38,7 +38,7 @@ app.add_middleware(
 )
 
 API_PREFIX = "/api/v1"
-for r in (chat.router, reports.router, admin.router, cron.router):
+for r in (chat.router, locations.router, reports.router, admin.router, cron.router):
     app.include_router(r, prefix=API_PREFIX)
 
 

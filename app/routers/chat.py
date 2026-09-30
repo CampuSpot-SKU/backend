@@ -2,12 +2,15 @@
 
 엔드포인트: 명세서 5-1 "사용자용 — 챗봇"
   POST /chat/sessions                          → {session_id}
-  POST /chat/sessions/{session_id}/messages    → 신고 되묻기 / 신고 접수 완료 / 애매함 되묻기 (JSON)
+  POST /chat/sessions/{session_id}/messages    → 신고 되묻기 / 요약 확인 / 취소 / 접수 완료 / 애매함 되묻기 (JSON)
                                                   행정문의는 SSE 스트림
-흐름:
-  1) 신고 되묻기에 대한 답변이면 → 의도분류 없이 슬롯필링 계속 ('취소'면 중단)
+흐름 (명세서 4-1 "신고 흐름 개편", 작업 1-3c):
+  0) 접수 완료 직후의 짧은 인사("네", "고마워요")면 → 의도분류 없이 마무리 한 줄
+  1) 신고 흐름 중(되묻기·요약 확인에 대한 답변)이면 → 의도분류 없이 슬롯필링 계속
+       [취소] → 중단 / [안내만 받을래요] → 신고 흐름 종료, 행정문의로 답변
+       요약 확인 중 [접수] → 최종 폼 값으로 접수 / 그 밖의 말 → 정정 내용으로 보고 요약 다시
   2) 아니면 ai 서비스로 의도분류 → report / inquiry / unclear
-  3) report: 대화에서 슬롯 추출 → 빠진 게 있으면 되묻기, 다 모이면 reports에 접수 생성
+  3) report: 대화에서 슬롯 추출 → 빠진 게 있으면 되묻기, 다 모이면 **요약 확인**(접수는 [접수] 후)
 판단 로직은 app/services/slot_filling.py, 접수 생성은 app/services/report_service.py.
 """
 import json
@@ -30,7 +33,10 @@ from app.rate_limit import chat_rate_limit, limiter
 from app.schemas.chat import (
     CategoryRef,
     ChatReply,
+    DraftIn,
     MessageIn,
+    ReportCancelled,
+    ReportConfirm,
     ReportCreated,
     ReportFollowUp,
     ReportSummary,
@@ -43,16 +49,27 @@ from app.services.report_service import create_report, load_buildings
 from app.services.slot_filling import (
     CANCEL_HINT,
     CANCELLED,
+    DONE_PREFIX,
+    START_GREETING,
+    THANKS_REPLY,
+    Draft,
+    ReportSlots,
+    apply_form,
+    build_summary,
     collect_draft,
     extract_slots,
     is_cancel,
+    is_confirm,
+    is_short_thanks,
+    judge_reason,
     next_question,
+    wants_inquiry,
 )
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
 
-HISTORY_LOOKBACK = 20  # 진행 중인 신고를 재구성할 때 볼 최근 메시지 수 (되묻기는 최대 2번이라 충분)
+HISTORY_LOOKBACK = 30  # 진행 중인 신고를 재구성할 때 볼 최근 메시지 수 (되묻기·요약·정정 몇 번을 포함해도 충분)
 DEFAULT_CLARIFY = "무엇에 대해 말씀하시는 건지 조금 더 알려주시겠어요?"
 # 행정문의 RAG(작업 1-4)가 붙기 전까지 쓰는 임시 답변 — 1-4에서 ai /rag/answer 스트리밍으로 교체
 INQUIRY_PLACEHOLDER = (
@@ -120,16 +137,44 @@ def send_message(
     history = list(reversed(recent))
     draft = collect_draft(history)
     user_msg = _add_message(db, session_id, ChatRole.USER, text, _next_ts(history))
+    action = body.action
 
-    # 1) 신고 되묻기에 대한 답변 → 의도분류 생략하고 슬롯필링 계속
-    if draft.in_progress:
+    # 0) 접수 완료 직후의 인사·확인성 짧은 답 → 새 신고로 시작하지 않고 마무리 한 줄 (명세 4-1 보완 ②)
+    if (
+        not draft.in_progress
+        and action is None
+        and _just_reported(history)
+        and is_short_thanks(text)
+    ):
+        _add_message(db, session_id, ChatRole.ASSISTANT, THANKS_REPLY, _after(user_msg))
+        db.commit()
+        return StreamingResponse(_sse_once(THANKS_REPLY), media_type="text/event-stream")
+
+    # 신고 흐름에서 빠져나와 안내만 받기 — 버튼 또는 글자
+    if action == "switch_to_inquiry" or (draft.in_progress and wants_inquiry(text)):
+        return _switch_to_inquiry(db, session_id, user_msg, draft)
+
+    # 1) 신고 흐름 중(되묻기·요약 확인에 대한 답변) → 의도분류 생략하고 슬롯필링 계속
+    if draft.in_progress or action in ("confirm_report", "cancel_report"):
         user_msg.intent = ChatIntent.REPORT
-        if is_cancel(text):
+        if action == "cancel_report" or (action is None and is_cancel(text)):
             _add_message(db, session_id, ChatRole.ASSISTANT, CANCELLED, _after(user_msg))
-            db.commit()
-            return ReportFollowUp(follow_up_question=CANCELLED, slots_filled=SlotsFilled())
-        return _report_step(db, session_id, user_msg, [*draft.user_texts, text],
-                            draft.asked, draft.safety_concern)
+            db.commit()  # intent 없이 저장 → 신고 흐름 끝 표시
+            return ReportCancelled(
+                message=CANCELLED, follow_up_question=CANCELLED, slots_filled=SlotsFilled()
+            )
+        confirm = draft.in_progress and (
+            action == "confirm_report" or (draft.confirming and action is None and is_confirm(text))
+        )
+        if action == "confirm_report" and not draft.in_progress:
+            # 화면이 오래돼 서버엔 진행 중인 신고가 없음 → 폼에 적힌 내용으로 새로 시작해 요약부터
+            texts = [t for t in [(body.draft.description if body.draft else None)] if t]
+            return _report_step(db, session_id, user_msg, texts, set(), False, start=True)
+        texts = list(draft.user_texts) if confirm else [*draft.user_texts, text]
+        return _report_step(
+            db, session_id, user_msg, texts, draft.asked, draft.safety_concern,
+            confirm=confirm, form=body.draft if confirm else None,
+        )
 
     # 2) 의도분류 (ai 서비스)
     ai_history = [HistoryItem(role=m.role.value, content=m.content) for m in history]
@@ -166,7 +211,43 @@ def send_message(
     # 3) 신고 — 새로 시작 (애매함→신고로 이어진 경우 원래 문장도 draft에 포함돼 있음)
     user_msg.intent = ChatIntent.REPORT
     return _report_step(db, session_id, user_msg, [*draft.user_texts, text], draft.asked,
-                        draft.safety_concern or result.safety_concern)
+                        draft.safety_concern or result.safety_concern, start=True)
+
+
+def _just_reported(history: list[ChatMessage]) -> bool:
+    """직전 챗봇 메시지가 접수 완료 안내였나."""
+    return bool(history) and (
+        history[-1].role == ChatRole.ASSISTANT
+        and history[-1].intent is None
+        and history[-1].content.startswith(DONE_PREFIX)
+    )
+
+
+def _switch_to_inquiry(
+    db: Session, session_id: uuid.UUID, user_msg: ChatMessage, draft: Draft
+) -> StreamingResponse:
+    """[안내만 받을래요] — 신고 흐름을 끝내고 첫 발화를 행정문의로 답변.
+
+    intent=행정문의로 저장하면 collect_draft가 신고 흐름 끝으로 봄.
+    TODO(1-4): 행정문의 RAG가 붙으면 첫 신고 문장(`draft.user_texts[0]`, 없으면 이번 메시지)으로
+    답변을 만들 것 — 지금은 임시 문구.
+    """
+    user_msg.intent = ChatIntent.INQUIRY
+    reply = _add_message(db, session_id, ChatRole.ASSISTANT, INQUIRY_PLACEHOLDER, _after(user_msg))
+    reply.intent = ChatIntent.INQUIRY
+    db.commit()
+    return StreamingResponse(_sse_once(INQUIRY_PLACEHOLDER), media_type="text/event-stream")
+
+
+def _slots_filled(slots: ReportSlots, description: str | None) -> SlotsFilled:
+    return SlotsFilled(
+        location=slots.location_text,
+        category=slots.category,
+        description=description if slots.has_problem else None,
+        building=slots.building,
+        floor=slots.floor,
+        detail=slots.detail,
+    )
 
 
 def _report_step(
@@ -176,31 +257,59 @@ def _report_step(
     texts: list[str],
     asked: set[str],
     safety_concern: bool,
-) -> ReportFollowUp | ReportCreated:
-    """슬롯을 뽑아서 되묻거나, 다 모였으면 접수 생성."""
+    *,
+    start: bool = False,
+    confirm: bool = False,
+    form: DraftIn | None = None,
+) -> ReportFollowUp | ReportConfirm | ReportCreated:
+    """슬롯을 뽑아서 되묻거나(빠진 게 있음), 요약을 보여주거나(다 모임), [접수] 확인이면 접수 생성."""
     joined = "\n".join(texts)
-    slots = extract_slots(joined, load_buildings(db), safety_concern)
-    question = next_question(slots, asked)
+    buildings = load_buildings(db)
+    form_desc = (form.description or "").strip() if form else ""
+    # 폼에서 상황 설명을 고쳤으면 그 내용도 판정에 반영
+    judged = f"{joined}\n{form_desc}" if form_desc and form_desc != joined else joined
+    slots = extract_slots(judged, buildings, safety_concern)
+    if confirm:
+        if form is not None:
+            slots = apply_form(slots, form.building, form.floor, form.detail, buildings, judged)
+        return _create(db, session_id, user_msg, slots, form_desc or joined)
 
+    question = next_question(slots, asked)
+    greeting = START_GREETING if start else ""
     if question is not None:
-        content = question + CANCEL_HINT
+        content = greeting + question.text + CANCEL_HINT
         reply = _add_message(db, session_id, ChatRole.ASSISTANT, content, _after(user_msg))
         reply.intent = ChatIntent.REPORT  # 신고 흐름 계속 중이라는 표시 (다음 요청에서 재구성용)
         db.commit()
         return ReportFollowUp(
             follow_up_question=content,
-            slots_filled=SlotsFilled(
-                location=slots.location_text,
-                category=slots.category,
-                description=joined if slots.has_problem else None,
-            ),
+            slots_filled=_slots_filled(slots, joined),
+            choices=question.choices,
         )
 
-    report, category = create_report(db, session_id, slots, description=joined)
+    # 필수 항목이 찼거나 같은 질문을 이미 했음 → 바로 접수하지 않고 요약 확인
+    summary = build_summary(slots, texts, greeting=start)
+    reply = _add_message(db, session_id, ChatRole.ASSISTANT, summary, _after(user_msg))
+    reply.intent = ChatIntent.REPORT
+    db.commit()
+    return ReportConfirm(
+        summary=summary, follow_up_question=summary, slots_filled=_slots_filled(slots, joined)
+    )
+
+
+def _create(
+    db: Session,
+    session_id: uuid.UUID,
+    user_msg: ChatMessage,
+    slots: ReportSlots,
+    description: str,
+) -> ReportCreated:
+    report, category = create_report(db, session_id, slots, description=description)
     done = (
-        f"신고가 접수됐어요! 접수번호는 {report.display_no}번이에요.\n"
+        f"{DONE_PREFIX}! 접수번호는 {report.display_no}번이에요.\n"
         f"· 위치: {slots.location_text or '담당자가 확인할게요'}\n"
         f"· 분류: {category.name} · 우선순위 {report.priority.value}\n"
+        f"· 판정 이유: {judge_reason(slots, report.priority.value)}\n"
         "담당 부서에서 확인 후 처리할게요."
     )
     # intent 없이 저장 → 신고 흐름 끝 표시 (다음 메시지는 새 대화로 시작)
@@ -214,7 +323,8 @@ def _report_step(
             category=CategoryRef(id=category.id, name=category.name),
             priority=report.priority,
             status=report.status,
-        )
+        ),
+        message=done,
     )
 
 
