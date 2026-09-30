@@ -153,3 +153,36 @@ def test_report_not_found(client: TestClient, headers: dict[str, str]) -> None:
     missing = f"/api/v1/admin/reports/{uuid.uuid4()}"
     assert client.get(missing, headers=headers).status_code == 404
     assert client.patch(f"{missing}/status", json={"to_status": "배정"}, headers=headers).status_code == 404
+
+
+def test_status_full_path_and_invalid_transitions(client: TestClient, headers: dict[str, str], admin: Admin) -> None:
+    """작업 1-7: 정상 경로 끝까지 + 재오픈 + 잘못된 전이 409 (명세 10-2)."""
+    r = make_report(created_ago_h=1, sla_h=24)
+    url = f"/api/v1/admin/reports/{r.id}"
+
+    # 2-2·2-3: 접수 상태에서 종료 직행·건너뛰기는 409, 상태·이력 그대로
+    res = client.patch(f"{url}/status", json={"to_status": "종료"}, headers=headers)
+    assert res.status_code == 409
+    assert "가능한 상태" in res.json()["detail"]
+    assert client.patch(f"{url}/status", json={"to_status": "처리중"}, headers=headers).status_code == 409
+    detail = client.get(url, headers=headers).json()
+    assert detail["status"] == "접수"
+    assert [h["to_status"] for h in detail["status_history"]] == ["접수"]
+
+    # 2-1·2-4: 배정 → 처리중 → 해결 → (재오픈) 처리중 → 해결 → 종료
+    for to in ("배정", "처리중", "해결", "처리중", "해결", "종료"):
+        res = client.patch(f"{url}/status", json={"to_status": to}, headers=headers)
+        assert res.status_code == 200, (to, res.json())
+    body = res.json()
+    assert body["status"] == "종료"
+    assert [h["to_status"] for h in body["status_history"]] == [
+        "접수", "배정", "처리중", "해결", "처리중", "해결", "종료",
+    ]
+    reopen = body["status_history"][4]
+    assert (reopen["from_status"], reopen["to_status"]) == ("해결", "처리중")
+    assert all(h["changed_by"] == {"id": str(admin.id), "name": "테스트관리자"} for h in body["status_history"][1:])
+
+    # 2-5: 종료 후에는 어떤 변경도 409
+    res = client.patch(f"{url}/status", json={"to_status": "처리중"}, headers=headers)
+    assert res.status_code == 409
+    assert "더 이상 바꿀 수 없어요" in res.json()["detail"]
