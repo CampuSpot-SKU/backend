@@ -382,7 +382,7 @@ def extract_slots(
     # 호수로 층 추정 — 301호는 3층, B101호는 지하 1층 (층을 안 말했거나, 말한 층이 그 건물에 없는데 호수가
     # 있는 층을 가리킬 때). 학교 데이터가 없는 건물은 4층 없는 건물 목록(campus.json)으로 대신 판단.
     if room:
-        num = room[1:] if room.startswith("B") else room
+        num = room.removeprefix("B")
         inferred = ("B" if room.startswith("B") else "") + str(int(num) // 100)
         bad_floor = bool(floor) and (
             cp.has_floor(building, floor) is False
@@ -798,7 +798,7 @@ def next_question(
             rooms = [p for p in cp.places(slots.building, slots.floor) if not p.is_toilet]
             if slots.detail:  # 예: 강의실 — 그 종류의 방만
                 rooms = [p for p in rooms if slots.detail in p.label or (slots.detail == "강의실" and p.is_classroom)]
-            loc = dict(building=slots.building, floor=cp.floor_label(slots.floor))
+            loc = {"building": slots.building, "floor": cp.floor_label(slots.floor)}
             chips = [*(p.display for p in rooms[:6]), *tail]
             if slots.detail:
                 return Question(
