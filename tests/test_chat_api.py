@@ -803,16 +803,6 @@ def test_vague_problem_is_asked_not_accepted(client: TestClient) -> None:
     assert summary["slots_filled"]["category"] == "전기"
 
 
-def sse_text(resp) -> str:  # type: ignore[no-untyped-def]
-    import json as _json
-
-    out = ""
-    for line in resp.text.splitlines():
-        if line.startswith("data: "):
-            payload = _json.loads(line[6:])
-            out += payload.get("delta", "")
-    return out
-
 
 def test_greeting_gets_short_reply_without_starting_a_flow(client: TestClient) -> None:
     sid = new_session(client)

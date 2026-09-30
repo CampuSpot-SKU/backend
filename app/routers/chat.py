@@ -54,7 +54,6 @@ from app.services.ai_client import (
     classify_intent,
     say_text,
 )
-from app.services.smalltalk import pick_reply
 from app.services.report_service import create_report, load_buildings
 from app.services.slot_filling import (
     ASK_EDIT,
@@ -87,6 +86,7 @@ from app.services.slot_filling import (
     next_question,
     wants_inquiry,
 )
+from app.services.smalltalk import pick_reply
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
