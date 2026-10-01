@@ -155,4 +155,5 @@ def test_pending_issue_is_mentioned_after_submit(client: TestClient) -> None:
     sid = new_session(client)
     send(client, sid, "청운관 3층 정수기 고장, 그리고 북악관 엘리베이터도 이상해요")
     done = send(client, sid, "네").json()
-    assert "북악관 엘리베이터" in done["message"]
+    assert "북악관 엘리베이터" in done["message"] and "아래 버튼" in done["message"]
+    assert done["choices"] == ["북악관 엘리베이터"]  # 남은 건을 누르면 바로 새 신고로 이어지는 추천 답변

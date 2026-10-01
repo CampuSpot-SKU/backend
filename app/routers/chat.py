@@ -487,9 +487,14 @@ def _create_from_agent(
     judged_text = "\n".join([state.problem, *user_texts]) if state.problem else "\n".join(user_texts)
     slots = judge(slots, judged_text)
     extra = ""
-    if state.pending_issues:
-        extra = f" 말씀하신 {', '.join(state.pending_issues)}도 따로 접수하시려면 말씀해 주세요."
-    return _create(db, session_id, user_msg, slots, ra.description_for(user_texts, state), extra=extra)
+    pending = [p for p in state.pending_issues if p][:3]
+    if pending:
+        names = ", ".join(f"'{p}'" for p in pending)
+        extra = f" 말씀하신 {names} 건도 따로 접수하시려면 아래 버튼을 눌러 주세요."
+    return _create(
+        db, session_id, user_msg, slots, ra.description_for(user_texts, state), extra=extra,
+        choices=pending or None,
+    )
 
 
 def _just_reported(history: list[ChatMessage]) -> bool:
@@ -648,6 +653,7 @@ def _create(
     slots: ReportSlots,
     description: str,
     extra: str = "",
+    choices: list[str] | None = None,
 ) -> ReportCreated:
     report, category = create_report(db, session_id, slots, description=description)
     where = f"{slots.location_text}에서 생긴 " if slots.location_text else ""
@@ -669,6 +675,7 @@ def _create(
             status=report.status,
         ),
         message=done,
+        choices=choices,
     )
 
 

@@ -99,6 +99,8 @@ class ReportCreated(BaseModel):
     report: ReportSummary
     # backend가 만든 완성 안내 문구 (접수번호·위치·판정 이유) — chat_messages에 저장되는 문구와 같음
     message: str
+    # 이어서 접수할 남은 건 (한 번에 한 건씩 접수한 경우) — 누르면 그 글자가 새 신고 메시지로 전송됨. 없으면 null
+    choices: list[str] | None = None
 
 
 class Unclear(BaseModel):
