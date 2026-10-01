@@ -59,6 +59,7 @@ from app.services.ai_client import (
     report_turn,
     say_text,
 )
+from app.services.photo_storage import PhotoStorage, StorageError, get_photo_storage
 from app.services.report_service import create_report, load_buildings, load_category_names
 from app.services.slot_filling import (
     ASK_EDIT,
@@ -116,6 +117,9 @@ Judger = Callable[[str, str | None, list[str]], JudgeResult]
 Phrase = Callable[[str, str, list[str]], str]
 Agent = ra.Agent  # 대화 맥락을 미리 채운 형태
 Judge = Callable[[ReportSlots, str], ReportSlots]  # 규칙으로 뽑은 슬롯 → AI 판정을 반영한 슬롯
+# 접수된 신고 id → 대기 사진을 옮긴 저장소 경로(사진 없음·저장소 실패면 None) — 작업 1-10
+AttachPhoto = Callable[[uuid.UUID], str | None]
+PHOTO_SENT = " 사진도 함께 전달했어요."  # 사진이 붙은 접수만 완료 문구 끝에 붙임 (명세 5-1)
 
 
 def get_intent_classifier() -> IntentClassifier:
@@ -144,6 +148,7 @@ Classifier = Annotated[IntentClassifier, Depends(get_intent_classifier)]
 PhraserDep = Annotated[Phraser, Depends(get_phraser)]
 JudgerDep = Annotated[Judger, Depends(get_judger)]
 AgentDep = Annotated[Agent, Depends(get_agent)]
+PhotoStorageDep = Annotated[PhotoStorage, Depends(get_photo_storage)]
 
 
 @router.post("/sessions", response_model=SessionCreated, status_code=201)
@@ -177,15 +182,21 @@ def reset_flow(
     request: Request,  # slowapi가 요구 (레이트 리미팅 키 계산용)
     session_id: uuid.UUID,
     db: DbSession,
+    photos: PhotoStorageDep,
 ) -> Response:
     """진행 중이던 신고 흐름을 끝냄 — 프론트가 페이지를 새로 열 때(새로고침) 한 번 호출.
 
     화면은 새로고침하면 대화 기록 없이 인사말만 보이는데 서버는 같은 session_id의 이전 대화를 기억하고
     있어서, 끝나지 않은 신고에 새 입력이 "정정"으로 이어붙는 문제를 막는다. 세션은 그대로 둠
     (본인 신고 조회가 session_id로 본인 확인을 하므로). 진행 중인 신고가 없으면 아무 일도 안 함.
+    올려 둔 대기 사진(1-10)도 지움 — 새로 연 화면엔 사진 칩이 없으므로. 저장소 실패는 무시.
     """
     if db.get(ChatSession, session_id) is None:
         raise HTTPException(status_code=404, detail="대화 세션을 찾을 수 없어요.")
+    try:
+        photos.delete_pending(session_id)
+    except StorageError as e:
+        logger.warning("새로고침 때 대기 사진 삭제 실패 session=%s: %s", session_id, e)
     history = _recent_history(db, session_id)
     if collect_draft(history).in_progress:
         # intent 없는 챗봇 메시지 → collect_draft가 신고 흐름의 끝으로 봄
@@ -218,6 +229,7 @@ def send_message(
     phraser: PhraserDep,
     judger: JudgerDep,
     agent: AgentDep,
+    photos: PhotoStorageDep,
 ) -> ChatReply | StreamingResponse:
     if db.get(ChatSession, session_id) is None:
         raise HTTPException(status_code=404, detail="대화 세션을 찾을 수 없어요.")
@@ -237,6 +249,14 @@ def send_message(
 
     def judge(slots: ReportSlots, judged_text: str) -> ReportSlots:
         return _judged(db, slots, judged_text, judger)
+
+    def attach(report_id: uuid.UUID) -> str | None:
+        # 사진 저장소 문제로 신고 접수가 실패하면 안 됨 → 로그만 남기고 사진 없이 접수 (작업 1-10)
+        try:
+            return photos.attach_to_report(session_id, report_id)
+        except StorageError as e:
+            logger.warning("접수 때 사진 붙이기 실패 report=%s: %s", report_id, e)
+            return None
 
     # 0) 접수 완료 직후의 인사·확인성 짧은 답 → 새 신고로 시작하지 않고 마무리 한 줄 (명세 4-1 보완 ②)
     if (
@@ -262,9 +282,11 @@ def send_message(
         tail = ra.report_tail(history)
         if tail.prev_action == "confirm" and (action == "confirm_report" or is_confirm(agent_text)) \
                 and tail.state is not None:
-            return _create_from_agent(db, session_id, user_msg, tail.state, tail.user_texts, judge)
+            return _create_from_agent(
+                db, session_id, user_msg, tail.state, tail.user_texts, judge, attach
+            )
         try:
-            return _agent_reply(db, session_id, user_msg, tail, agent_text, agent, judge)
+            return _agent_reply(db, session_id, user_msg, tail, agent_text, agent, judge, attach)
         except AiServiceError as e:
             logger.warning("신고 에이전트 실패 → 규칙 기반 흐름으로 대체: %s", e)
             user_msg.debug_payload = {"agent_error": str(e)[:300]}
@@ -292,7 +314,7 @@ def send_message(
                 texts, descs = draft.with_reply(text)
             return _report_step(
                 db, session_id, user_msg, texts, descs, draft.asked, draft.safety_concern,
-                phrase, intro=True, judge=judge,
+                phrase, intro=True, judge=judge, attach=attach,
             )
         if draft.confirming and action is None and is_edit(text) and not is_confirm(text):
             return _ask_edit(db, session_id, user_msg, draft, phrase)
@@ -303,7 +325,7 @@ def send_message(
             # 화면이 오래돼 서버엔 진행 중인 신고가 없음 → 폼에 적힌 내용으로 새로 시작해 요약부터
             texts = [t for t in [(body.draft.description if body.draft else None)] if t]
             return _report_step(
-                db, session_id, user_msg, texts, texts, set(), False, phrase, judge=judge
+                db, session_id, user_msg, texts, texts, set(), False, phrase, judge=judge, attach=attach,
             )
         if confirm:
             texts, descs = list(draft.user_texts), list(draft.desc_texts)
@@ -312,6 +334,7 @@ def send_message(
         return _report_step(
             db, session_id, user_msg, texts, descs, draft.asked, draft.safety_concern, phrase,
             confirm=confirm, form=body.draft if confirm else None, judge=judge,
+            attach=attach,
         )
 
     # 2) 의도분류 (ai 서비스)
@@ -365,7 +388,7 @@ def send_message(
     tail = _first_tail(history, draft)
     try:
         return _agent_reply(
-            db, session_id, user_msg, tail, text, agent, judge,
+            db, session_id, user_msg, tail, text, agent, judge, attach,
             first=True, safety_concern=draft.safety_concern or result.safety_concern,
         )
     except AiServiceError as e:
@@ -426,6 +449,7 @@ def _agent_reply(
     text: str,
     agent: Agent,
     judge: Judge,
+    attach: AttachPhoto,
     *,
     first: bool = False,
     safety_concern: bool = False,
@@ -441,7 +465,7 @@ def _agent_reply(
     if safety_concern:
         user_msg.intent_scores = {**(user_msg.intent_scores or {}), "safety_concern": True}
     if decision.action == "submit":
-        return _create_from_agent(db, session_id, user_msg, state, texts, judge)
+        return _create_from_agent(db, session_id, user_msg, state, texts, judge, attach)
     if decision.action == "cancel":
         return _cancel(db, session_id, user_msg, decision.message)
     if decision.action == "decline":
@@ -486,6 +510,7 @@ def _create_from_agent(
     state: AgentState,
     user_texts: list[str],
     judge: Judge,
+    attach: AttachPhoto,
 ) -> ReportCreated:
     slots = ra.slots_from_state(state, load_buildings(db))
     judged_text = "\n".join([state.problem, *user_texts]) if state.problem else "\n".join(user_texts)
@@ -496,7 +521,7 @@ def _create_from_agent(
         names = ", ".join(f"'{p}'" for p in pending)
         extra = f" 말씀하신 {names} 건도 따로 접수하시려면 아래 버튼을 눌러 주세요."
     return _create(
-        db, session_id, user_msg, slots, ra.description_for(user_texts, state), extra=extra,
+        db, session_id, user_msg, slots, ra.description_for(user_texts, state), attach, extra=extra,
         choices=pending or None,
     )
 
@@ -585,6 +610,7 @@ def _report_step(
     phrase: Phrase,
     *,
     judge: Judge,
+    attach: AttachPhoto,
     intro: bool = False,  # 접수 제안에 "응"이라고 답한 직후 — "필요한 정보를 물어볼게요."로 시작
     confirm: bool = False,
     form: DraftIn | None = None,
@@ -601,7 +627,7 @@ def _report_step(
         if form is not None:
             slots = apply_form(slots, form.building, form.floor, form.detail, buildings, judged)
         slots = judge(slots, judged)  # 최종 위치 기준으로 AI가 카테고리·영향도·긴급도·이유 판정
-        return _create(db, session_id, user_msg, slots, form_desc or described or joined)
+        return _create(db, session_id, user_msg, slots, form_desc or described or joined, attach)
 
     slots = judge(slots, judged)  # AI 판정 (실패하면 규칙 기반 값 그대로) — 상황을 말했는지도 여기서 판단
     # 학생이 마지막 답에서 "모르겠어요"라고 했으면 그 항목은 다시 묻지 않음
@@ -656,15 +682,20 @@ def _create(
     user_msg: ChatMessage,
     slots: ReportSlots,
     description: str,
+    attach: AttachPhoto,
     extra: str = "",
     choices: list[str] | None = None,
 ) -> ReportCreated:
     report, category = create_report(db, session_id, slots, description=description)
+    photo_path = attach(report.id)  # 대기 사진이 있으면 이 신고로 옮김 (1-10)
+    if photo_path:
+        report.photo_url = photo_path  # URL이 아니라 저장소 경로 — 관리자 조회 때 임시 링크로 바꿈
     where = f"{slots.location_text}에서 생긴 " if slots.location_text else ""
     done = (
         f"{DONE_PREFIX}! 접수번호는 {report.display_no}번이에요. "
         f"{where}{category.name} 문제로 분류했어요. "
         f"{judge_reason(slots, report.priority.value)} 담당 부서에서 확인 후 처리할게요.{extra}"
+        f"{PHOTO_SENT if photo_path else ''}"
     )
     # intent 없이 저장 → 신고 흐름 끝 표시 (다음 메시지는 새 대화로 시작)
     _add_message(db, session_id, ChatRole.ASSISTANT, done, _after(user_msg))

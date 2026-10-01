@@ -7,7 +7,7 @@ import logging
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 
 from app.deps import CurrentAdmin, DbSession
@@ -28,11 +28,14 @@ from app.services.auth import (
     authenticate,
     create_access_token,
 )
+from app.services.photo_storage import PhotoStorage, get_photo_storage
 from app.services.report_query import get_report_detail, list_reports
 from app.services.report_workflow import InvalidTransitionError, change_status
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+PhotoStorageDep = Annotated[PhotoStorage, Depends(get_photo_storage)]
 
 _AUTH_ERRORS: dict[int | str, dict[str, Any]] = {401: {"description": "토큰 없음·만료·위조"}, 503: {"description": "JWT_SECRET 미설정"}}
 
@@ -85,12 +88,21 @@ def get_reports(
     response_model=AdminReportDetail,
     responses={**_AUTH_ERRORS, 404: {"description": "신고 없음"}},
 )
-def get_report(report_id: uuid.UUID, db: DbSession, _admin: CurrentAdmin) -> AdminReportDetail:
-    """상세보기 — 신고 전체 필드 + 상태 이력 타임라인."""
+def get_report(
+    report_id: uuid.UUID, db: DbSession, _admin: CurrentAdmin, photos: PhotoStorageDep
+) -> AdminReportDetail:
+    """상세보기 — 신고 전체 필드 + 상태 이력 타임라인. photo_url은 10분짜리 임시 링크(없거나 실패면 null)."""
     detail = get_report_detail(db, report_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="신고를 찾을 수 없어요.")
-    return detail
+    return _with_photo_link(detail, photos)
+
+
+def _with_photo_link(detail: AdminReportDetail, photos: PhotoStorage) -> AdminReportDetail:
+    """DB에는 저장소 경로(reports/{id}/photo)가 있음 → 비공개 버킷이라 볼 때마다 임시 링크로 바꿔 내려줌 (1-10)."""
+    if not detail.photo_url:
+        return detail
+    return detail.model_copy(update={"photo_url": photos.signed_url(detail.photo_url)})
 
 
 @router.patch(
@@ -99,7 +111,8 @@ def get_report(report_id: uuid.UUID, db: DbSession, _admin: CurrentAdmin) -> Adm
     responses={**_AUTH_ERRORS, 404: {"description": "신고 없음"}, 409: {"description": "허용되지 않는 상태 변경"}},
 )
 def patch_report_status(
-    report_id: uuid.UUID, body: StatusChangeIn, db: DbSession, admin: CurrentAdmin
+    report_id: uuid.UUID, body: StatusChangeIn, db: DbSession, admin: CurrentAdmin,
+    photos: PhotoStorageDep,
 ) -> AdminReportDetail:
     """상태 변경 + 이력 기록(변경한 관리자·메모). 응답은 변경 후 상세."""
     # 두 관리자가 동시에 바꿔도 이력이 꼬이지 않게 행 잠금
@@ -114,4 +127,5 @@ def patch_report_status(
     logger.info("신고 상태 변경 display_no=%s → %s by %s", report.display_no, body.to_status.value, admin.login_id)
     detail = get_report_detail(db, report_id)
     assert detail is not None
-    return detail
+    # 화면은 이 응답으로 상세를 갈아끼우므로 사진도 상세 조회와 똑같이 임시 링크로
+    return _with_photo_link(detail, photos)

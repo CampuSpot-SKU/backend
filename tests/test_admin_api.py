@@ -26,6 +26,8 @@ from app.db.session import get_engine, get_sessionmaker
 from app.main import app
 from app.models import Admin, Category, Report, ReportStatusHistory
 from app.models.enums import Priority, ReportStatus
+from app.services.photo_storage import get_photo_storage
+from tests.fake_photo_storage import FAKE_STORAGE, SIGNED_PREFIX  # 진짜 저장소 대신 (1-10)
 
 PASSWORD = "test-only-password"
 
@@ -35,8 +37,10 @@ def client() -> Iterator[TestClient]:
     get_settings.cache_clear()
     get_engine.cache_clear()
     get_sessionmaker.cache_clear()
+    app.dependency_overrides[get_photo_storage] = lambda: FAKE_STORAGE
     with TestClient(app) as c:
         yield c
+    app.dependency_overrides.pop(get_photo_storage, None)
 
 
 @pytest.fixture(scope="module")
@@ -186,3 +190,25 @@ def test_status_full_path_and_invalid_transitions(client: TestClient, headers: d
     res = client.patch(f"{url}/status", json={"to_status": "처리중"}, headers=headers)
     assert res.status_code == 409
     assert "더 이상 바꿀 수 없어요" in res.json()["detail"]
+
+
+def test_detail_photo_is_signed_link(client: TestClient, headers: dict[str, str]) -> None:
+    """DB에는 저장소 경로 → 상세·상태 변경 응답에선 임시 링크, 목록엔 사진 정보 없음 (1-10)."""
+    with_photo = make_report(created_ago_h=1, sla_h=24)
+    without = make_report(created_ago_h=1, sla_h=24)
+    db = get_sessionmaker()()
+    r = db.get(Report, with_photo.id)
+    assert r is not None
+    r.photo_url = f"reports/{r.id}/photo"
+    db.commit()
+    db.close()
+
+    body = client.get(f"/api/v1/admin/reports/{with_photo.id}", headers=headers).json()
+    assert body["photo_url"].startswith(SIGNED_PREFIX + f"reports/{with_photo.id}/photo")
+    assert client.get(f"/api/v1/admin/reports/{without.id}", headers=headers).json()["photo_url"] is None
+    patched = client.patch(f"/api/v1/admin/reports/{with_photo.id}/status", headers=headers,
+                           json={"to_status": "배정", "memo": None})
+    assert patched.status_code == 200
+    assert patched.json()["photo_url"].startswith(SIGNED_PREFIX)  # 화면이 이 응답으로 상세를 갈아끼움
+    items = client.get("/api/v1/admin/reports", headers=headers, params={"limit": 200}).json()["items"]
+    assert all("photo_url" not in i for i in items)

@@ -6,6 +6,7 @@ ai 서비스는 호출하지 않고 가짜 분류기로 대체한다 (Gemini 불
 """
 import json
 import os
+import uuid
 from collections.abc import Iterator
 from typing import Any
 
@@ -27,6 +28,8 @@ from app.models import Building, Report, ReportStatusHistory
 from app.models.enums import ReportStatus
 from app.routers.chat import get_intent_classifier, get_judger, get_phraser
 from app.services.ai_client import AiServiceError, HistoryItem, IntentResult, JudgeResult
+from app.services.photo_storage import get_photo_storage
+from tests.fake_photo_storage import FAKE_STORAGE  # 진짜 저장소 대신 (1-10)
 
 # 문장 → 가짜 의도분류 결과 (명세서 4-4 few-shot과 같은 판정)
 FAKE: dict[str, IntentResult] = {
@@ -89,6 +92,8 @@ def client() -> Iterator[TestClient]:
     get_sessionmaker.cache_clear()
     app.dependency_overrides[get_intent_classifier] = lambda: fake_classifier
     app.dependency_overrides[get_judger] = lambda: fake_judger
+    # 모든 접수 테스트가 사진 붙이기 경로를 지나가므로 진짜 저장소 대신 가짜를 먼저 끼운다 (1-10)
+    app.dependency_overrides[get_photo_storage] = lambda: FAKE_STORAGE
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
@@ -888,3 +893,95 @@ def test_emergency_words_keep_urgency_high_even_if_ai_says_low(
     done = send(client, sid, "접수").json()
     assert done["report"]["priority"] == "P1"
     assert "급하지 않아 보여요" not in done["message"]  # 모순되는 AI 이유는 버림
+
+
+# ── 사진 업로드 → 접수 때 신고에 붙음 (작업 1-10) ───────────────────────────────
+JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + b"\x00" * 64
+PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"\x00" * 64
+PHOTO_SENT = " 사진도 함께 전달했어요."
+
+
+@pytest.fixture()
+def photos() -> Iterator[Any]:
+    FAKE_STORAGE.fail_attach = False
+    yield FAKE_STORAGE
+    FAKE_STORAGE.fail_attach = False
+
+
+def upload(client: TestClient, sid: str, data: bytes = JPEG):  # type: ignore[no-untyped-def]
+    return client.post(f"/api/v1/chat/sessions/{sid}/photo", files={"file": ("p.jpg", data, "image/jpeg")})
+
+
+def file_report(client: TestClient, sid: str) -> dict[str, Any]:
+    body = begin(client, sid, "혜인관 2층 화장실 물이 계속 새요")
+    assert body["confirm_required"] is True, body
+    done = send(client, sid, "네, 접수해 주세요").json()
+    assert done["report_created"] is True, done
+    return done  # type: ignore[no-any-return]
+
+
+def test_photo_upload_replaces_and_is_attached_on_report(client: TestClient, photos: Any) -> None:
+    sid = new_session(client)
+    assert upload(client, sid).status_code == 201
+    res = upload(client, sid, PNG)
+    assert res.status_code == 201 and res.json()["content_type"] == "image/png"
+    assert photos.pending[uuid.UUID(sid)][1] == "image/png"
+    done = file_report(client, sid)
+    report = get_report(done["report"]["display_no"])
+    assert report.photo_url == f"reports/{report.id}/photo"
+    assert done["message"].endswith(PHOTO_SENT)
+    assert uuid.UUID(sid) not in photos.pending
+
+
+def test_report_without_photo_message_unchanged(client: TestClient, photos: Any) -> None:
+    sid = new_session(client)
+    done = file_report(client, sid)
+    report = get_report(done["report"]["display_no"])
+    assert report.photo_url is None
+    assert "사진" not in done["message"]
+    assert done["message"].endswith("담당 부서에서 확인 후 처리할게요.")
+
+
+def test_storage_failure_does_not_block_report(client: TestClient, photos: Any) -> None:
+    sid = new_session(client)
+    assert upload(client, sid).status_code == 201
+    photos.fail_attach = True
+    before = report_count()
+    done = file_report(client, sid)
+    assert report_count() == before + 1
+    assert get_report(done["report"]["display_no"]).photo_url is None
+    assert "사진" not in done["message"]
+
+
+def test_cancel_or_decline_keeps_pending_photo(client: TestClient, photos: Any) -> None:
+    sid = new_session(client)
+    assert upload(client, sid).status_code == 201
+    begin(client, sid, "물이 계속 새요")
+    assert send(client, sid, "취소", action="cancel_report").json()["report_cancelled"] is True
+    assert uuid.UUID(sid) in photos.pending  # 화면 칩도 그대로라서 서버 대기 사진도 남김
+    offer = send(client, sid, "혜인관 2층 화장실 물이 계속 새요").json()
+    assert offer["choices"][0] == "네, 접수해 주세요"
+    assert send(client, sid, "아니요, 안내만 받을게요").status_code == 200
+    assert uuid.UUID(sid) in photos.pending
+
+
+def test_reset_deletes_pending_photo(client: TestClient, photos: Any) -> None:
+    sid = new_session(client)
+    assert upload(client, sid).status_code == 201
+    assert reset(client, sid).status_code == 204
+    assert uuid.UUID(sid) not in photos.pending
+    done = file_report(client, sid)
+    assert get_report(done["report"]["display_no"]).photo_url is None
+
+
+def test_deleted_photo_is_not_attached(client: TestClient, photos: Any) -> None:
+    sid = new_session(client)
+    assert upload(client, sid).status_code == 201
+    assert client.delete(f"/api/v1/chat/sessions/{sid}/photo").status_code == 204
+    done = file_report(client, sid)
+    assert get_report(done["report"]["display_no"]).photo_url is None
+
+
+def test_photo_unknown_session_404(client: TestClient) -> None:
+    res = upload(client, "00000000-0000-0000-0000-000000000000")
+    assert res.status_code == 404 and res.json() == {"detail": "대화 세션을 찾을 수 없어요."}

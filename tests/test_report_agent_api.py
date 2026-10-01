@@ -23,6 +23,8 @@ from app.main import app
 from app.models import Report
 from app.routers.chat import get_agent, get_intent_classifier, get_judger
 from app.services.ai_client import AgentState, AgentTurn, AiServiceError, IntentResult
+from app.services.photo_storage import get_photo_storage
+from tests.fake_photo_storage import FAKE_STORAGE  # 진짜 저장소 대신 (1-10)
 
 SCRIPT: dict[str, Any] = {"turns": [], "calls": [], "fail": False}
 
@@ -59,6 +61,7 @@ def client() -> Iterator[TestClient]:
     app.dependency_overrides[get_intent_classifier] = lambda: fake_classifier
     app.dependency_overrides[get_judger] = lambda: fake_judger
     app.dependency_overrides[get_agent] = lambda: fake_agent
+    app.dependency_overrides[get_photo_storage] = lambda: FAKE_STORAGE
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
@@ -184,3 +187,24 @@ def test_plain_chitchat_still_gets_short_reply_without_agent(client: TestClient)
     sid = new_session(client)
     res = send(client, sid, "오늘 날씨 어때요")
     assert res.headers["content-type"].startswith("text/event-stream") and not SCRIPT["calls"]
+
+
+def test_agent_path_attaches_uploaded_photo(client: TestClient) -> None:
+    """에이전트 경로(_create_from_agent)로 접수돼도 대기 사진이 신고에 붙는다 (1-10)."""
+    SCRIPT["turns"] = [
+        turn("confirm", "북악관 6층 606호 불이 안 켜지는 문제예요. 이대로 접수할까요?",
+             building="북악관", floor="6", room_no="606", location_certainty="confirmed")
+    ]
+    sid = new_session(client)
+    jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+    up = client.post(f"/api/v1/chat/sessions/{sid}/photo", files={"file": ("x.jpg", jpeg, "image/jpeg")})
+    assert up.status_code == 201
+    send(client, sid, "북악관 606호 불이 안 켜져")
+    done = send(client, sid, "네, 접수해 주세요").json()
+    assert done["message"].endswith(" 사진도 함께 전달했어요.")
+    db = get_sessionmaker()()
+    try:
+        report = db.scalar(select(Report).where(Report.id == done["report"]["id"]))
+        assert report is not None and report.photo_url == f"reports/{report.id}/photo"
+    finally:
+        db.close()
