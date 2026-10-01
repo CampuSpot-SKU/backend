@@ -203,7 +203,7 @@ def slots_from_state(state: AgentState, buildings: Sequence[BuildingRef]) -> Rep
         slots = replace(
             slots, unknown_place=f"{'·'.join(state.near)} {'사이' if state.near_relation == 'between' else '근처'}"
         )
-    return replace(slots, impact=_impact(" ".join([state.problem, state.place]), slots.building, slots.detail))
+    return replace(slots, impact=_impact(f"{state.problem} {state.place}", slots.building, slots.detail))
 
 
 def description_for(user_texts: Sequence[str], state: AgentState) -> str:

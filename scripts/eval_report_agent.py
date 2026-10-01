@@ -15,13 +15,20 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from agent_eval_cases import CASES, Case  # noqa: E402
-from agent_extra_cases import EXTRA  # noqa: E402
+from agent_eval_cases import CASES, Case
+from agent_extra_cases import EXTRA
+from ai.agent import (
+    AgentError,
+    BuildingInfo,
+    Candidate,
+    TurnMessage,
+    TurnRequest,
+    turn,
+)
 
-from ai.agent import AgentError, BuildingInfo, Candidate, TurnMessage, TurnRequest, turn  # noqa: E402
-from app.services import report_agent as ra  # noqa: E402
-from app.services.ai_client import AgentState, AgentTurn, AiServiceError, HistoryItem  # noqa: E402
-from app.services.slot_filling import campus_rules  # noqa: E402
+from app.services import report_agent as ra
+from app.services.ai_client import AgentState, AgentTurn, AiServiceError, HistoryItem
+from app.services.slot_filling import campus_rules
 
 MAX_QUESTIONS = 2
 
