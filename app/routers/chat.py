@@ -47,13 +47,16 @@ from app.schemas.chat import (
     Unclear,
 )
 from app.services import campus_places as cp
+from app.services import report_agent as ra
 from app.services.ai_client import (
+    AgentState,
     AiServiceError,
     HistoryItem,
     IntentResult,
     JudgeResult,
     classify_intent,
     judge_report,
+    report_turn,
     say_text,
 )
 from app.services.report_service import create_report, load_buildings, load_category_names
@@ -72,6 +75,7 @@ from app.services.slot_filling import (
     SUMMARY_CHOICES,
     THANKS_REPLY,
     UNKNOWN_WORDS,
+    BuildingRef,
     Draft,
     ReportSlots,
     apply_form,
@@ -109,7 +113,8 @@ IntentClassifier = Callable[[str, list[HistoryItem]], IntentResult]
 Phraser = Callable[[str, str, list[str], list[HistoryItem]], str]
 # (신고 내용, 확인된 위치, 카테고리 이름들) → AI 판정 (1-3b). 실패하면 AiServiceError
 Judger = Callable[[str, str | None, list[str]], JudgeResult]
-Phrase = Callable[[str, str, list[str]], str]  # 대화 맥락을 미리 채운 형태
+Phrase = Callable[[str, str, list[str]], str]
+Agent = ra.Agent  # 대화 맥락을 미리 채운 형태
 Judge = Callable[[ReportSlots, str], ReportSlots]  # 규칙으로 뽑은 슬롯 → AI 판정을 반영한 슬롯
 
 
@@ -128,11 +133,17 @@ def get_phraser() -> Phraser:
     return say_text
 
 
+def get_agent() -> Agent:
+    """신고 대화 에이전트(ai /report/turn). 테스트에서 가짜로 바꿔 끼우기 위한 의존성."""
+    return report_turn
+
+
 # 의존성은 Annotated로 선언 (FastAPI 권장 방식, ruff B008 대응)
 DbSession = Annotated[Session, Depends(get_db)]
 Classifier = Annotated[IntentClassifier, Depends(get_intent_classifier)]
 PhraserDep = Annotated[Phraser, Depends(get_phraser)]
 JudgerDep = Annotated[Judger, Depends(get_judger)]
+AgentDep = Annotated[Agent, Depends(get_agent)]
 
 
 @router.post("/sessions", response_model=SessionCreated, status_code=201)
@@ -206,6 +217,7 @@ def send_message(
     classify: Classifier,
     phraser: PhraserDep,
     judger: JudgerDep,
+    agent: AgentDep,
 ) -> ChatReply | StreamingResponse:
     if db.get(ChatSession, session_id) is None:
         raise HTTPException(status_code=404, detail="대화 세션을 찾을 수 없어요.")
@@ -240,6 +252,22 @@ def send_message(
     # 신고 흐름에서 빠져나와 안내만 받기 — 버튼 또는 글자
     if action == "switch_to_inquiry" or (draft.in_progress and wants_inquiry(text)):
         return _switch_to_inquiry(db, session_id, user_msg, draft)
+
+    # 1-0) 에이전트가 진행하던 신고 대화 → 에이전트가 이어서 처리 (실패하면 아래 규칙 기반 흐름으로 대체)
+    if draft.in_progress and draft.last_kind == ra.AGENT_KIND:
+        user_msg.intent = ChatIntent.REPORT
+        if action == "cancel_report" or (action is None and is_cancel(text)):
+            return _cancel(db, session_id, user_msg)
+        agent_text = "네, 접수해 주세요" if action == "confirm_report" else text
+        tail = ra.report_tail(history)
+        if tail.prev_action == "confirm" and (action == "confirm_report" or is_confirm(agent_text)) \
+                and tail.state is not None:
+            return _create_from_agent(db, session_id, user_msg, tail.state, tail.user_texts, judge)
+        try:
+            return _agent_reply(db, session_id, user_msg, tail, agent_text, agent, judge)
+        except AiServiceError as e:
+            logger.warning("신고 에이전트 실패 → 규칙 기반 흐름으로 대체: %s", e)
+            user_msg.debug_payload = {"agent_error": str(e)[:300]}
 
     # 1) 신고 흐름 중(되묻기·요약 확인에 대한 답변) → 의도분류 생략하고 슬롯필링 계속
     if draft.in_progress or action in ("confirm_report", "cancel_report"):
@@ -327,8 +355,20 @@ def send_message(
         db.commit()
         return StreamingResponse(_sse_once(INQUIRY_PLACEHOLDER), media_type="text/event-stream")
 
-    # 3-0) 신고로 접수하기 어려운 말 (칭찬·감상뿐이거나 말이 안 되는 내용) — 흐름을 시작하지 않고 한 번 되물음.
-    #      바로 앞 답변이 이 되묻기였는데 학생이 다시 말하면 그대로 접수 흐름으로 넘어감 (멀쩡한 신고를 막지 않음)
+    # 3) 신고 — 에이전트가 먼저 걸러내고(말이 안 되거나 확인이 필요하면 확인 질문부터) 필요한 것만 묻는다.
+    #    바로 앞이 에이전트의 거절이었는데 학생이 다시 말하면 그 대화를 이어서 본다 (멀쩡한 신고를 막지 않음)
+    user_msg.intent = ChatIntent.REPORT
+    tail = _first_tail(history, draft)
+    try:
+        return _agent_reply(
+            db, session_id, user_msg, tail, text, agent, judge,
+            first=True, safety_concern=draft.safety_concern or result.safety_concern,
+        )
+    except AiServiceError as e:
+        logger.warning("신고 에이전트 실패 → 규칙 기반 흐름으로 대체: %s", e)
+        user_msg.debug_payload = {**(user_msg.debug_payload or {}), "agent_error": str(e)[:300]}
+
+    # 3-0) (대체 경로) 신고로 접수하기 어려운 말 — 흐름을 시작하지 않고 한 번 되물음
     asked_before = bool(history) and (
         history[-1].role == ChatRole.ASSISTANT
         and (history[-1].debug_payload or {}).get("kind") == NON_REPORT_KIND
@@ -336,17 +376,120 @@ def send_message(
     not_report = None if asked_before else check_not_report(text)
     if not_report is not None:
         reason, reply_text = not_report
+        user_msg.intent = None
         user_msg.debug_payload = {"non_report": reason}
         _add_message(db, session_id, ChatRole.ASSISTANT, reply_text, _after(user_msg), NON_REPORT_KIND)
         db.commit()  # intent 없이 저장 → 신고 흐름이 시작되지 않은 상태 그대로
         return StreamingResponse(_sse_once(reply_text), media_type="text/event-stream")
 
-    # 3) 신고 — 먼저 접수를 도와드릴지 물음 (애매함→신고로 이어진 경우 원래 문장도 draft에 포함돼 있음)
-    user_msg.intent = ChatIntent.REPORT
+    # (대체 경로) 먼저 접수를 도와드릴지 물음
     return _offer(
         db, session_id, user_msg, [*draft.user_texts, text], [*draft.desc_texts, text],
         draft.safety_concern or result.safety_concern, phrase,
     )
+
+
+def _first_tail(history: list[ChatMessage], draft: Draft) -> ra.Tail:
+    """새 신고의 첫 턴 — 직전에 에이전트가 거절했거나 애매함 되묻기였으면 그 대화를 이어서 본다."""
+    conversation: list[HistoryItem] = []
+    texts = list(draft.user_texts)  # 애매함 → 신고로 이어진 경우 원래 문장 포함
+    if len(history) >= 2 and history[-1].role == ChatRole.ASSISTANT and (
+        history[-1].debug_payload or {}
+    ).get("kind") == ra.DECLINE_KIND and history[-2].role == ChatRole.USER:
+        texts = [history[-2].content]
+        conversation = [
+            HistoryItem(role="user", content=history[-2].content),
+            HistoryItem(role="assistant", content=history[-1].content),
+        ]
+    elif texts:
+        conversation = [HistoryItem(role="user", content=t) for t in texts]
+    return ra.Tail(
+        conversation=conversation, state=None, prev_action=None, asked=0,
+        student_turns=len(texts), user_texts=texts,
+    )
+
+
+def _agent_slots_filled(state: AgentState, buildings: list[BuildingRef], description: str | None) -> SlotsFilled:
+    slots = ra.slots_from_state(state, buildings)
+    return _slots_filled(slots, description)
+
+
+def _agent_reply(
+    db: Session,
+    session_id: uuid.UUID,
+    user_msg: ChatMessage,
+    tail: ra.Tail,
+    text: str,
+    agent: Agent,
+    judge: Judge,
+    *,
+    first: bool = False,
+    safety_concern: bool = False,
+) -> ChatReply | StreamingResponse:
+    """에이전트에게 이번 턴을 맡기고 정책을 적용한 결과를 응답으로 만든다. AiServiceError는 호출한 쪽이 처리."""
+    buildings = load_buildings(db)
+    decision = ra.decide(tail, text, [b.name for b in buildings], agent)
+    state = decision.state
+    texts = [*tail.user_texts, text]
+    payload: dict[str, object] = {
+        "kind": ra.AGENT_KIND, "action": decision.action, "state": state.model_dump(), "clarify": decision.clarify,
+    }
+    if safety_concern:
+        user_msg.intent_scores = {**(user_msg.intent_scores or {}), "safety_concern": True}
+    if decision.action == "submit":
+        return _create_from_agent(db, session_id, user_msg, state, texts, judge)
+    if decision.action == "cancel":
+        return _cancel(db, session_id, user_msg, decision.message)
+    if decision.action == "decline":
+        user_msg.intent = None if first else ChatIntent.REPORT
+        reply = _add_message(
+            db, session_id, ChatRole.ASSISTANT, decision.message, _after(user_msg), ra.DECLINE_KIND
+        )
+        reply.intent = None  # intent 없이 저장 → 신고 흐름 끝 (첫 턴이면 시작되지 않은 상태 그대로)
+        db.commit()
+        if first:
+            return StreamingResponse(_sse_once(decision.message), media_type="text/event-stream")
+        return ReportFollowUp(
+            follow_up_question=decision.message,
+            slots_filled=_agent_slots_filled(state, buildings, None),
+        )
+    reply = _add_message(db, session_id, ChatRole.ASSISTANT, decision.message, _after(user_msg), payload=payload)
+    reply.intent = ChatIntent.REPORT
+    db.commit()
+    filled = _agent_slots_filled(state, buildings, state.problem or None)
+    if decision.action == "confirm":
+        return ReportConfirm(
+            summary=decision.message, follow_up_question=decision.message,
+            slots_filled=filled, choices=decision.choices,
+        )
+    return ReportFollowUp(
+        follow_up_question=decision.message, slots_filled=filled, choices=decision.choices or None
+    )
+
+
+def _cancel(
+    db: Session, session_id: uuid.UUID, user_msg: ChatMessage, message: str = CANCELLED
+) -> ReportCancelled:
+    _add_message(db, session_id, ChatRole.ASSISTANT, message, _after(user_msg))
+    db.commit()  # intent 없이 저장 → 신고 흐름 끝 표시
+    return ReportCancelled(message=message, follow_up_question=message, slots_filled=SlotsFilled())
+
+
+def _create_from_agent(
+    db: Session,
+    session_id: uuid.UUID,
+    user_msg: ChatMessage,
+    state: AgentState,
+    user_texts: list[str],
+    judge: Judge,
+) -> ReportCreated:
+    slots = ra.slots_from_state(state, load_buildings(db))
+    judged_text = "\n".join([state.problem, *user_texts]) if state.problem else "\n".join(user_texts)
+    slots = judge(slots, judged_text)
+    extra = ""
+    if state.pending_issues:
+        extra = f" 말씀하신 {', '.join(state.pending_issues)}도 따로 접수하시려면 말씀해 주세요."
+    return _create(db, session_id, user_msg, slots, ra.description_for(user_texts, state), extra=extra)
 
 
 def _just_reported(history: list[ChatMessage]) -> bool:
@@ -504,13 +647,14 @@ def _create(
     user_msg: ChatMessage,
     slots: ReportSlots,
     description: str,
+    extra: str = "",
 ) -> ReportCreated:
     report, category = create_report(db, session_id, slots, description=description)
     where = f"{slots.location_text}에서 생긴 " if slots.location_text else ""
     done = (
         f"{DONE_PREFIX}! 접수번호는 {report.display_no}번이에요. "
         f"{where}{category.name} 문제로 분류했어요. "
-        f"{judge_reason(slots, report.priority.value)} 담당 부서에서 확인 후 처리할게요."
+        f"{judge_reason(slots, report.priority.value)} 담당 부서에서 확인 후 처리할게요.{extra}"
     )
     # intent 없이 저장 → 신고 흐름 끝 표시 (다음 메시지는 새 대화로 시작)
     _add_message(db, session_id, ChatRole.ASSISTANT, done, _after(user_msg))
@@ -535,9 +679,12 @@ def _add_message(
     content: str,
     created_at: datetime,
     kind: str | None = None,  # 챗봇 메시지 종류 — 말투가 바뀌어도 대화 재구성에서 알아보게 저장
+    payload: dict[str, object] | None = None,  # kind 외에 저장할 값 (에이전트 상태 등)
 ) -> ChatMessage:
     msg = ChatMessage(session_id=session_id, role=role, content=content, created_at=created_at)
-    if kind:
+    if payload:
+        msg.debug_payload = payload
+    elif kind:
         msg.debug_payload = {"kind": kind}
     db.add(msg)
     return msg

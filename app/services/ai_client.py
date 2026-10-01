@@ -115,3 +115,65 @@ def judge_report(text: str, location: str | None, categories: list[str]) -> Judg
     except (httpx.HTTPError, ValidationError, ValueError) as e:
         logger.warning("ai report judge 실패: %s", e)
         raise AiServiceError(str(e)) from e
+
+
+AGENT_TIMEOUT_SECONDS = 25.0  # 신고 대화 에이전트 — Gemini 호출 + 재시도 1회. 실패하면 규칙 기반 흐름으로 대체
+
+
+class AgentState(BaseModel):
+    """ai `POST /api/v1/report/turn`의 신고 상태 (ai/agent.py AgentState와 같은 모양)."""
+
+    problem: str = ""
+    problem_clear: bool = False
+    plausible: bool = True
+    building: str = ""
+    floor: str = ""
+    place: str = ""
+    location_note: str = ""
+    location_certainty: Literal["confirmed", "uncertain", "unknown"] = "unknown"
+    area: Literal["unknown", "indoor", "outdoor_near", "outdoor_open", "non_building"] = "unknown"
+    room_kind: Literal["unknown", "numbered", "unnumbered"] = "unknown"
+    room_no: str = ""
+    room_name: str = ""
+    contained_in: str = ""
+    near: list[str] = []
+    near_relation: Literal["none", "attached", "apart", "between"] = "none"
+    staff_check: list[str] = []
+    pending_issues: list[str] = []
+
+
+class AgentTurn(BaseModel):
+    action: Literal["ask", "confirm", "submit", "cancel", "decline"]
+    message: str
+    choices: list[str]
+    state: AgentState
+
+
+def report_turn(
+    conversation: list[HistoryItem],
+    state: AgentState | None,
+    prev_action: str | None,
+    questions_left: int,
+    buildings: list[dict[str, str]],
+    candidates: list[dict[str, str]],
+    hints: list[str] | None = None,
+) -> AgentTurn:
+    """신고 접수 대화 한 턴을 에이전트가 처리. 실패하면 AiServiceError (호출한 쪽이 규칙 기반 흐름으로 대체)."""
+    url = _endpoint("/report/turn")
+    payload = {
+        "conversation": [h.model_dump() for h in conversation[-24:]],
+        "state": state.model_dump() if state else None,
+        "prev_action": prev_action,
+        "questions_left": questions_left,
+        "buildings": buildings,
+        "candidates": candidates,
+        "hints": hints or [],
+    }
+    headers = {"X-Internal-Secret": get_settings().ai_service_secret}
+    try:
+        res = httpx.post(url, json=payload, headers=headers, timeout=AGENT_TIMEOUT_SECONDS)
+        res.raise_for_status()
+        return AgentTurn.model_validate(res.json())
+    except (httpx.HTTPError, ValidationError, ValueError) as e:
+        logger.warning("ai report turn 실패: %s", e)
+        raise AiServiceError(str(e)) from e

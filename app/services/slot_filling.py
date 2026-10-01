@@ -907,7 +907,7 @@ def _apply_reply(extract: list[str], desc: list[str], prev_kind: str | None, tex
             extract.append(f"{text} {CONFIRMED_MARK}" if result == "picked" else text)
             return
     extract.append(text)
-    if prev_kind == KIND_PROBLEM or prev_kind is None or _has_problem_text(text):
+    if prev_kind in (KIND_PROBLEM, "agent") or prev_kind is None or _has_problem_text(text):
         desc.append(text)
 
 
