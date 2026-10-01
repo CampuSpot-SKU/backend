@@ -58,6 +58,10 @@ FAKE: dict[str, IntentResult] = {
     "혜인관 7층 화장실 물이 새요": IntentResult(intent="report", report_score=93, inquiry_score=7),
     "스포렉스 샤워실 온수가 안 나와요": IntentResult(intent="report", report_score=90, inquiry_score=10),
     "혜인관 2층 화장실 콘센트에서 연기가 나요": IntentResult(intent="report", report_score=95, inquiry_score=5),
+    # 1-23: 분류기는 마스킹된 문장만 받아야 함 — 원본 문장이 오면 KeyError로 실패
+    "제 학번은 ***이고 3동 2층 화장실 물이 계속 새요": IntentResult(intent="report", report_score=95, inquiry_score=5),
+    "***": IntentResult(intent="unclear", report_score=40, inquiry_score=40,
+                        clarifying_question="무엇을 도와드릴까요?"),
 }
 
 # 가짜 AI 판정 — result가 None이면 AI 실패(AiServiceError)로 규칙 기반 대체 경로를 탐
@@ -985,3 +989,59 @@ def test_deleted_photo_is_not_attached(client: TestClient, photos: Any) -> None:
 def test_photo_unknown_session_404(client: TestClient) -> None:
     res = upload(client, "00000000-0000-0000-0000-000000000000")
     assert res.status_code == 404 and res.json() == {"detail": "대화 세션을 찾을 수 없어요."}
+
+
+# ── 학번·전화번호 마스킹 (작업 1-23) ─────────────────────────────────────────
+def stored_user_messages(sid: str) -> list[str]:
+    from app.models.chat import ChatMessage
+    from app.models.enums import ChatRole
+
+    db = get_sessionmaker()()
+    try:
+        rows = db.scalars(
+            select(ChatMessage).where(
+                ChatMessage.session_id == uuid.UUID(sid), ChatMessage.role == ChatRole.USER
+            )
+        ).all()
+        return [r.content for r in rows]
+    finally:
+        db.close()
+
+
+def test_student_id_is_masked_before_store_classify_and_report(client: TestClient) -> None:
+    sid = new_session(client)
+    first = begin(client, sid, "제 학번은 20201234이고 3동 2층 화장실 물이 계속 새요")
+    # 학교에 없는 "3동"은 기존 규칙대로 되물음 — 마스킹 때문에 흐름이 달라지지 않음
+    assert "'3동'은(는) 제가 아는 학교 장소에 없어요" in first["follow_up_question"]
+    assert first["slots_filled"]["floor"] == "2" and first["slots_filled"]["detail"] == "화장실"
+    body = send(client, sid, "혜인관이요").json()
+    assert body["confirm_required"] is True, body
+    assert "20201234" not in body["summary"]
+    assert body["slots_filled"]["floor"] == "2" and body["slots_filled"]["detail"] == "화장실"
+    done = send(client, sid, "네, 접수해 주세요").json()
+    assert done["report_created"] is True
+    report = get_report(done["report"]["display_no"])
+    assert "20201234" not in report.description and "***" in report.description
+    assert report.floor == "2" and report.detail == "화장실"  # 위치 인식은 그대로
+    stored = stored_user_messages(sid)
+    assert stored and all("20201234" not in m for m in stored)
+    assert "20201234" not in done["message"]
+
+
+def test_number_only_message_is_handled(client: TestClient) -> None:
+    sid = new_session(client)
+    res = send(client, sid, "010-1234-5678")
+    assert res.status_code == 200
+    assert stored_user_messages(sid) == ["***"]
+
+
+def test_form_values_are_masked(client: TestClient) -> None:
+    sid = new_session(client)
+    assert begin(client, sid, "혜인관 2층 화장실 물이 계속 새요")["confirm_required"] is True
+    form = {"building": "혜인관", "floor": "2", "detail": "화장실 01012345678",
+            "description": "010-1234-5678 화장실 물이 새요"}
+    done = send(client, sid, "접수", action="confirm_report", draft=form).json()
+    assert done["report_created"] is True
+    report = get_report(done["report"]["display_no"])
+    assert "010-1234-5678" not in report.description and "***" in report.description
+    assert "01012345678" not in (report.detail or "")

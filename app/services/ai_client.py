@@ -11,6 +11,7 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from app.config import get_settings
+from app.services.pii_mask import mask_optional, mask_pii
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,11 @@ class AiServiceError(Exception):
     """ai 서비스 호출 실패 (설정 누락·네트워크·5xx·응답 형식 오류 모두)."""
 
 
+def _masked(history: list[HistoryItem]) -> list[dict[str, str]]:
+    """Gemini로 보내는 대화 기록 — 학번·전화번호 마스킹 (1-23 2겹째: 입구를 우회한 옛 메시지도 새지 않게)."""
+    return [{"role": h.role, "content": mask_pii(h.content)} for h in history]
+
+
 def _endpoint(path: str) -> str:
     base = get_settings().ai_service_url.rstrip("/")
     if not base:
@@ -51,8 +57,8 @@ def classify_intent(text: str, history: list[HistoryItem]) -> IntentResult:
     """발화를 신고/행정문의/애매함으로 분류."""
     url = _endpoint("/intent/classify")
     payload = {
-        "text": text,
-        "history": [h.model_dump() for h in history[-MAX_HISTORY:]],
+        "text": mask_pii(text),
+        "history": _masked(history[-MAX_HISTORY:]),
     }
     headers = {"X-Internal-Secret": get_settings().ai_service_secret}
     try:
@@ -76,9 +82,9 @@ def say_text(kind: str, base_text: str, must_include: list[str], history: list[H
         url = _endpoint("/report/say")
         payload = {
             "kind": kind,
-            "base_text": base_text,
-            "must_include": must_include,
-            "history": [h.model_dump() for h in history[-4:]],
+            "base_text": mask_pii(base_text),
+            "must_include": [mask_pii(m) for m in must_include],
+            "history": _masked(history[-4:]),
         }
         headers = {"X-Internal-Secret": get_settings().ai_service_secret}
         res = httpx.post(url, json=payload, headers=headers, timeout=SAY_TIMEOUT_SECONDS)
@@ -87,7 +93,9 @@ def say_text(kind: str, base_text: str, must_include: list[str], history: list[H
     except (AiServiceError, httpx.HTTPError, ValueError) as e:
         logger.info("말투 다듬기 실패 → 고정 문구 사용 (%s): %s", kind, e)
         return base_text
-    return text if text and all(m in text for m in must_include) else base_text
+    # 보낸 값과 같은 기준(마스킹된 must_include)으로 확인 — 원본 번호를 다시 요구해 어긋나지 않게
+    must = [mask_pii(m) for m in must_include]
+    return text if text and all(m in text for m in must) else base_text
 
 
 JUDGE_TIMEOUT_SECONDS = 10.0  # 판정은 실패해도 규칙 기반으로 대체되므로 오래 기다리지 않음
@@ -106,7 +114,7 @@ class JudgeResult(BaseModel):
 def judge_report(text: str, location: str | None, categories: list[str]) -> JudgeResult:
     """신고 내용의 카테고리·영향도·긴급도·이유를 AI가 판정. 실패하면 AiServiceError (호출한 쪽이 규칙 기반으로 대체)."""
     url = _endpoint("/report/judge")
-    payload = {"text": text[:2000], "location": location, "categories": categories}
+    payload = {"text": mask_pii(text)[:2000], "location": mask_optional(location), "categories": categories}
     headers = {"X-Internal-Secret": get_settings().ai_service_secret}
     try:
         res = httpx.post(url, json=payload, headers=headers, timeout=JUDGE_TIMEOUT_SECONDS)
@@ -150,6 +158,19 @@ class AgentTurn(BaseModel):
     state: AgentState
 
 
+def _masked_state(state: AgentState) -> dict[str, object]:
+    """에이전트 상태의 문자열 값(학생 말에서 뽑은 것)도 마스킹. 학교 데이터(buildings·candidates)는 그대로."""
+    out: dict[str, object] = {}
+    for k, v in state.model_dump().items():
+        if isinstance(v, str):
+            out[k] = mask_pii(v)
+        elif isinstance(v, list):
+            out[k] = [mask_pii(x) if isinstance(x, str) else x for x in v]
+        else:
+            out[k] = v
+    return out
+
+
 def report_turn(
     conversation: list[HistoryItem],
     state: AgentState | None,
@@ -162,13 +183,13 @@ def report_turn(
     """신고 접수 대화 한 턴을 에이전트가 처리. 실패하면 AiServiceError (호출한 쪽이 규칙 기반 흐름으로 대체)."""
     url = _endpoint("/report/turn")
     payload = {
-        "conversation": [h.model_dump() for h in conversation[-24:]],
-        "state": state.model_dump() if state else None,
+        "conversation": _masked(conversation[-24:]),
+        "state": _masked_state(state) if state else None,
         "prev_action": prev_action,
         "questions_left": questions_left,
         "buildings": buildings,
         "candidates": candidates,
-        "hints": hints or [],
+        "hints": [mask_pii(h) for h in hints or []],
     }
     headers = {"X-Internal-Secret": get_settings().ai_service_secret}
     try:

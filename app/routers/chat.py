@@ -60,6 +60,7 @@ from app.services.ai_client import (
     say_text,
 )
 from app.services.photo_storage import PhotoStorage, StorageError, get_photo_storage
+from app.services.pii_mask import mask_optional, mask_pii
 from app.services.report_service import create_report, load_buildings, load_category_names
 from app.services.slot_filling import (
     ASK_EDIT,
@@ -233,9 +234,16 @@ def send_message(
 ) -> ChatReply | StreamingResponse:
     if db.get(ChatSession, session_id) is None:
         raise HTTPException(status_code=404, detail="대화 세션을 찾을 수 없어요.")
-    text = body.content.strip()
+    # 학번·전화번호는 받자마자 지움 → 저장·분류·판정·접수 설명이 전부 마스킹된 값만 봄 (1-23, 명세 11장)
+    text = mask_pii(body.content.strip())
     if not text:
         raise HTTPException(status_code=422, detail="메시지가 비어 있어요.")
+    if body.draft is not None:
+        d = body.draft
+        body.draft = d.model_copy(update={
+            "building": mask_optional(d.building), "floor": mask_optional(d.floor),
+            "detail": mask_optional(d.detail), "description": mask_optional(d.description),
+        })
 
     history = _recent_history(db, session_id)
     draft = collect_draft(history)
