@@ -329,6 +329,10 @@ def send_message(
         "safety_concern": result.safety_concern,
     }
 
+    if result.intent in ("chitchat", "off_topic") and ra.needs_agent_review(text):
+        # 잡담·범위 밖으로 봤지만 "신고해주세요"거나 위험한 말("폭파할게요") — 정해진 한 마디로 끝내지 않고 에이전트가 판단
+        result = result.model_copy(update={"intent": "report"})
+
     if result.intent in ("chitchat", "off_topic"):
         # 인사·잡담·범위 밖 — 신고도 문의도 아니므로 흐름을 만들지 않고 짧게 한 마디만 (Gemini 재호출 없음)
         recent = [m.content for m in history if m.role == ChatRole.ASSISTANT]

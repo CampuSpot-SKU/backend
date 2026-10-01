@@ -21,6 +21,19 @@ from app.services.slot_filling import (
     _impact,
 )
 
+# 의도분류가 잡담·범위 밖으로 본 말이라도 신고 요청이거나 안전이 걸린 말이면 에이전트가 직접 판단하게 한다.
+# (정규식은 "말이 무슨 뜻인가"가 아니라 "사람 판단이 필요한 말인가"만 가려낸다 — 판단은 에이전트가 함. 안전 단어는 ai/agent.py와 같이 유지)
+_REPORT_REQUEST_RE = re.compile(r"신고|접수")
+_SAFETY_RE = re.compile(
+    r"화재|불이\s*(?:났|붙)|불났|연기가\s*(?:나|자욱|가득|올라)|연기\s*나|가스\s*(?:냄새|누출|샌|새)|감전|폭발|폭파|폭탄|쓰러|의식\s*(?:이\s*)?없|(?<![가-힣])피가\s*(?:나|난|흘|철철|많)|피를\s*(?:흘|토|많)|다쳤|다친|갇혔|갇혀|끼였|추락"
+)
+
+
+def needs_agent_review(text: str) -> bool:
+    """잡담·범위 밖으로 분류됐지만 신고 요청("신고해주세요")이거나 위험한 말이면 에이전트에게 넘긴다."""
+    return bool(_REPORT_REQUEST_RE.search(text) or _SAFETY_RE.search(text))
+
+
 AGENT_KIND = "agent"
 DECLINE_KIND = "agent_decline"  # 에이전트가 거절한 말 — 학생이 다시 말하면 이어서 봄
 MAX_QUESTIONS = 2
@@ -146,6 +159,19 @@ def _other_building_clarify(tail: Tail, user_text: str, state: AgentState) -> De
     return Decision("ask", msg, ["별개 건이에요", "고칠게요"], tail.state or state, clarify=True)
 
 
+def _fill_landmark_near(state: AgentState, texts: Sequence[str], building_names: Sequence[str]) -> AgentState:
+    """학생이 말한 장소가 학교 데이터의 건물 아닌 장소(혜청사 등)면 가까운 건물을 데이터대로 채운다 (모델이 빠뜨려도)."""
+    if state.near:
+        return state
+    for hit in cp.search_places(" ".join(texts)):
+        if hit.kind == "landmark" and hit.near:
+            near = [n for n in hit.near if n in building_names]
+            if near:
+                area = state.area if state.area != "unknown" else "outdoor_near"
+                return state.model_copy(update={"near": near, "near_relation": hit.relation or "attached", "area": area})
+    return state
+
+
 def decide(tail: Tail, user_text: str, building_names: Sequence[str], agent: Agent) -> Decision:
     """학생의 이번 말까지 반영해 다음 행동을 정한다. AiServiceError는 호출한 쪽에서 처리 (규칙 기반으로 대체)."""
     texts = [*tail.user_texts, user_text]
@@ -154,6 +180,7 @@ def decide(tail: Tail, user_text: str, building_names: Sequence[str], agent: Age
     questions_left = max(0, MAX_QUESTIONS - tail.asked)
     out = agent(conversation, tail.state, tail.prev_action, questions_left, buildings, candidates, hints)
     state, action, message, choices = out.state, out.action, out.message, list(out.choices)
+    state = _fill_landmark_near(state, texts, building_names)
 
     if action not in ("cancel", "decline") and (clar := _other_building_clarify(tail, user_text, state)):
         return clar

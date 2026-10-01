@@ -124,6 +124,7 @@ class AgentState(BaseModel):
     """ai `POST /api/v1/report/turn`의 신고 상태 (ai/agent.py AgentState와 같은 모양)."""
 
     problem: str = ""
+    symptom: str = ""
     problem_clear: bool = False
     plausible: bool = True
     building: str = ""

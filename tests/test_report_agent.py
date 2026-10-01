@@ -136,3 +136,10 @@ def test_other_building_without_correction_asks_instead_of_overwriting() -> None
     # 이미 확인했으면 다시 묻지 않음
     tail.prev_clarify = True
     assert not ra.decide(tail, "북악관이 이상해", NAMES, _agent(action="ask", state=new)).clarify
+
+
+def test_landmark_near_buildings_are_filled_from_school_data() -> None:
+    state = AgentState(problem="가로등이 꺼졌어요", problem_clear=True, place="가로등")
+    out = ra.decide(_tail(), "혜청사 앞 가로등이 꺼졌어요", NAMES, _agent(action="confirm", message="접수할까요?", state=state))
+    assert out.state.near == ["혜인관", "청운관"] and out.state.near_relation == "between"
+    assert out.state.area == "outdoor_near"

@@ -34,7 +34,16 @@ def fake_agent(conv, state, prev, left, buildings, candidates, hints):  # type: 
     return SCRIPT["turns"].pop(0)
 
 
+CHITCHAT = {
+    "정수기가 너무 맛있어요 신고해주세요": "chitchat",
+    "ㅋㅋㅋ 학교 폭파할게요 혜인관 3층": "off_topic",
+    "오늘 날씨 어때요": "off_topic",
+}
+
+
 def fake_classifier(text, history):  # type: ignore[no-untyped-def]
+    if text in CHITCHAT:
+        return IntentResult(intent=CHITCHAT[text], report_score=5, inquiry_score=5, talk="smalltalk")  # type: ignore[arg-type]
     return IntentResult(intent="report", report_score=90, inquiry_score=10)
 
 
@@ -157,3 +166,21 @@ def test_pending_issue_is_mentioned_after_submit(client: TestClient) -> None:
     done = send(client, sid, "네").json()
     assert "북악관 엘리베이터" in done["message"] and "아래 버튼" in done["message"]
     assert done["choices"] == ["북악관 엘리베이터"]  # 남은 건을 누르면 바로 새 신고로 이어지는 추천 답변
+
+
+def test_chitchat_that_asks_for_report_or_is_dangerous_goes_to_agent(client: TestClient) -> None:
+    SCRIPT["turns"] = [
+        turn("decline", "말씀해 주신 내용만으로는 고치거나 조치할 문제가 보이지 않아요.", problem="", problem_clear=False),
+        turn("ask", "지금 위험하거나 다친 분이 있으면 먼저 119나 112에 연락해 주세요. 혜인관 3층에서 어떤 문제가 있나요?",
+             problem="", problem_clear=False, building="혜인관", floor="3"),
+    ]
+    sid = new_session(client)
+    send(client, sid, "정수기가 너무 맛있어요 신고해주세요")
+    send(client, sid, "ㅋㅋㅋ 학교 폭파할게요 혜인관 3층")
+    assert len(SCRIPT["calls"]) == 2  # 잡담으로 분류됐어도 에이전트가 두 말 모두 판단
+
+
+def test_plain_chitchat_still_gets_short_reply_without_agent(client: TestClient) -> None:
+    sid = new_session(client)
+    res = send(client, sid, "오늘 날씨 어때요")
+    assert res.headers["content-type"].startswith("text/event-stream") and not SCRIPT["calls"]

@@ -195,7 +195,9 @@ class PlaceHit:
     label: str  # 학생에게 보여줄 이름 (예: "장문수 교수연구실 (606)")
     building: str  # 건물 이름 (건물 밖 장소면 빈 문자열)
     floor: str  # "6", "B1" (없으면 빈 문자열)
-    kind: str  # room / facility / outdoor
+    kind: str  # room / facility / outdoor / landmark
+    near: tuple[str, ...] = ()  # 건물이 아닌 장소(landmark)가 붙어 있거나 사이에 있는 건물들
+    relation: str = ""  # between / attached / ... (landmark만)
 
 
 def term_hints(text: str) -> list[str]:
@@ -273,6 +275,8 @@ def _alias_index() -> tuple[dict[str, list[PlaceHit]], int]:
             hit = PlaceHit(
                 p["name"] if p["kind"] != "facility" else p["core"], p["building"], p["floor"],
                 {"person_office": "room", "landmark": "landmark"}.get(p["kind"], p["kind"]),
+                tuple(p.get("near") or ()),
+                p.get("relation") or "",
             )
             index.setdefault(key + "\x00" + kind, []).append(hit)
     flat: dict[str, list[PlaceHit]] = {}
