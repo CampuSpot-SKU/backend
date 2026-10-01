@@ -8,6 +8,7 @@
 import json
 import re
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -215,7 +216,37 @@ def term_hints(text: str) -> list[str]:
             else:
                 out.append(f"{p['core']} = {p['name']} — 건물이 아니라서 어느 건물인지 묻지 않음")
     out += _same_name_room_hints(compact)
+    out += missing_name_hints(text)
     return out
+
+
+_PERSON_MENTION_RE = re.compile(r"([가-힣]{2,4}?)\s*교수(?:님)?\s*(?:연구실|강의실|실|방)?")
+_NOT_A_NAME = ("담당", "지도", "전임", "초빙", "겸임", "석좌", "명예", "신임", "해당", "그", "저", "이", "우리")
+
+
+@lru_cache(maxsize=1)
+def _professor_names() -> frozenset[str]:
+    return frozenset(
+        p["core"].replace(" ", "").removesuffix("교수연구실") for p in _places_data()["places"] if p["kind"] == "person_office"
+    )
+
+
+def missing_name_hints(text: str) -> list[str]:
+    """학생이 말한 교수 이름이 학교 데이터 어디에도 없으면 알려 준다 (비슷한 이름 포함)."""
+    names = _professor_names()
+    out: list[str] = []
+    for m in _PERSON_MENTION_RE.finditer(text):
+        name = m.group(1)
+        if len(name) < 2 or name in names or name.endswith(_NOT_A_NAME) or name in _NOT_A_NAME or name in [o.split("'")[1] for o in out]:
+            continue
+        near = sorted(
+            ((SequenceMatcher(None, name, n).ratio(), n) for n in names if abs(len(n) - len(name)) <= 1),
+            reverse=True,
+        )
+        similar = [n for r, n in near if r >= 0.5][:3]
+        tail = f" 비슷한 이름: {', '.join(similar)}" if similar else " 비슷한 이름도 없음"
+        out.append(f"'{name}' 교수 연구실은 학교 데이터 어디에도 없음 (모든 건물 확인).{tail}")
+    return out[:2]
 
 
 @lru_cache(maxsize=1)

@@ -143,3 +143,13 @@ def test_landmark_near_buildings_are_filled_from_school_data() -> None:
     out = ra.decide(_tail(), "혜청사 앞 가로등이 꺼졌어요", NAMES, _agent(action="confirm", message="접수할까요?", state=state))
     assert out.state.near == ["혜인관", "청운관"] and out.state.near_relation == "between"
     assert out.state.area == "outdoor_near"
+
+
+def test_unknown_professor_name_gets_hint_with_similar_names() -> None:
+    from app.services import campus_places as cp
+
+    hints = cp.missing_name_hints("박차원 교수실에 불이 났어요")
+    assert hints and "'박차원' 교수 연구실은 학교 데이터 어디에도 없음" in hints[0]
+    assert cp.missing_name_hints("장문수 교수실 불이 안 켜져") == []
+    assert "김지상" in cp.missing_name_hints("김지산 교수실")[0]
+    assert cp.missing_name_hints("담당 교수님 방 불이 안 켜져요") == []
