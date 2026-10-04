@@ -1,7 +1,7 @@
 """관리자용 엔드포인트 — 로그인, 신고 목록·상세·상태 변경 (작업 1-6, 명세서 5-1).
 
 로그인 외 모든 엔드포인트는 Authorization: Bearer {access_token} 필요 (CurrentAdmin 의존성).
-탐지·예측(/admin/problem-clusters, /admin/predictions)은 routers/detection.py(1-8), 설정(/admin/config/*)은 아직(1-17).
+탐지·예측(/admin/problem-clusters, /admin/predictions)은 routers/detection.py(1-8), 설정(/admin/config/*)은 routers/config_admin.py(1-17).
 """
 import logging
 import uuid
