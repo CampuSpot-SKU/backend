@@ -9,7 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.models.enums import Priority, ReportStatus
+from app.models.enums import ClusterStatus, Priority, ReportStatus
 
 # SLA 상태: 처리 중인 건만 계산 (해결·종료는 null)
 #   초과 = 마감 지남 / 임박 = SLA 시간 절반 이상 경과(명세 3-1 "50% 경과 → 리마인드"와 같은 기준) / 온타임 = 그 외
@@ -77,3 +77,41 @@ class AdminReportDetail(AdminReportItem):
 class StatusChangeIn(BaseModel):
     to_status: ReportStatus
     memo: str | None = Field(default=None, max_length=1000, examples=["시설팀 배정, 오후 방문 예정"])
+
+
+# ── 탐지·예측 (작업 1-8 — 명세서 3-3, 5-1 "관리자용 — 탐지·예측", 화면 계약 team-docs briefs/1-8.md) ──
+
+
+class ProblemClusterItem(BaseModel):
+    """문제 후보 한 건 — 목록 원소이자 PATCH 응답 (같은 모양)."""
+
+    id: uuid.UUID
+    building: NamedRef | None  # 건물 없이 묶인 후보면 null
+    detail: str | None
+    category: NamedRef
+    report_count: int  # 이 후보에 묶인 신고 수 (problem_cluster_reports)
+    detected_at: datetime
+    status: ClusterStatus
+
+
+class ProblemClusterList(BaseModel):
+    items: list[ProblemClusterItem]
+
+
+class ClusterStatusChangeIn(BaseModel):
+    # 후보로 되돌리기는 없음 — 결정은 후보 → 승격/기각 한 번 (routers/detection.py)
+    status: Literal["승격", "기각"]
+
+
+class PredictionItem(BaseModel):
+    """재발 예측 한 줄 — 배치가 계산을 끝낸 행만 나옴 (avg·예상 시점이 비어 있는 행은 제외)."""
+
+    building: NamedRef | None
+    detail: str | None
+    category: NamedRef
+    avg_recurrence_days: float
+    predicted_next_at: datetime
+
+
+class PredictionList(BaseModel):
+    items: list[PredictionItem]
