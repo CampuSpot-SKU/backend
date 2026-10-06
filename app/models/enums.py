@@ -43,6 +43,7 @@ class ChatIntent(str, enum.Enum):
 class DocType(str, enum.Enum):
     REGULATION = "학칙"
     NOTICE = "공지"
+    GUIDE = "안내"
 
 
 class ClusterStatus(str, enum.Enum):
