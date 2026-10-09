@@ -24,10 +24,17 @@ from sqlalchemy import func, select
 from app.config import get_settings
 from app.db.session import get_engine, get_sessionmaker
 from app.main import app
-from app.models import Building, Report, ReportStatusHistory
+from app.models import Building, ChatMessage, Report, ReportStatusHistory
 from app.models.enums import ReportStatus
-from app.routers.chat import get_intent_classifier, get_judger, get_phraser
-from app.services.ai_client import AiServiceError, HistoryItem, IntentResult, JudgeResult
+from app.routers.chat import get_answerer, get_intent_classifier, get_judger, get_phraser
+from app.services.ai_client import (
+    AiServiceError,
+    HistoryItem,
+    IntentResult,
+    JudgeResult,
+    RagAnswer,
+    RagSource,
+)
 from app.services.photo_storage import get_photo_storage
 from tests.fake_photo_storage import FAKE_STORAGE  # 진짜 저장소 대신 (1-10)
 
@@ -62,7 +69,23 @@ FAKE: dict[str, IntentResult] = {
     "제 학번은 ***이고 3동 2층 화장실 물이 계속 새요": IntentResult(intent="report", report_score=95, inquiry_score=5),
     "***": IntentResult(intent="unclear", report_score=40, inquiry_score=40,
                         clarifying_question="무엇을 도와드릴까요?"),
+    "RAG 장애 문의": IntentResult(intent="inquiry", report_score=3, inquiry_score=97),
 }
+
+# 가짜 RAG 답변 (1-4c) — ai를 부르지 않고 질문별로 정해 둔 답과 근거를 돌려줌
+ANSWER = RagAnswer(
+    answer="학칙 제29조에 따르면 휴학은 학기 시작 전에 신청해야 해요.",
+    sources=[RagSource(title="학칙 제29조(휴학)", article_no="제29조", url="https://x.kr/r#29"),
+             RagSource(title="휴학 안내")],
+)
+ANSWER_QUESTIONS: list[str] = []
+
+
+def fake_answerer(question: str) -> RagAnswer:
+    ANSWER_QUESTIONS.append(question)
+    if question == "RAG 장애 문의":
+        raise AiServiceError("rag down")
+    return ANSWER
 
 # 가짜 AI 판정 — result가 None이면 AI 실패(AiServiceError)로 규칙 기반 대체 경로를 탐
 JUDGE: dict[str, Any] = {"result": None, "calls": []}
@@ -96,6 +119,7 @@ def client() -> Iterator[TestClient]:
     get_sessionmaker.cache_clear()
     app.dependency_overrides[get_intent_classifier] = lambda: fake_classifier
     app.dependency_overrides[get_judger] = lambda: fake_judger
+    app.dependency_overrides[get_answerer] = lambda: fake_answerer
     # 모든 접수 테스트가 사진 붙이기 경로를 지나가므로 진짜 저장소 대신 가짜를 먼저 끼운다 (1-10)
     app.dependency_overrides[get_photo_storage] = lambda: FAKE_STORAGE
     with TestClient(app) as c:
@@ -156,9 +180,24 @@ def building_id(name: str):  # type: ignore[no-untyped-def]
         db.close()
 
 
+def sse_events(res) -> list[dict[str, Any]]:  # type: ignore[no-untyped-def]
+    return [json.loads(line[6:]) for line in res.text.splitlines() if line.startswith("data: ")]
+
+
 def sse_text(res) -> str:  # type: ignore[no-untyped-def]
-    events = [json.loads(line[6:]) for line in res.text.splitlines() if line.startswith("data: ")]
-    return "".join(e.get("delta", "") for e in events)
+    return "".join(e.get("delta", "") for e in sse_events(res))
+
+
+def saved_messages(sid: str) -> list[ChatMessage]:
+    db = get_sessionmaker()()
+    try:
+        rows = db.scalars(
+            select(ChatMessage).where(ChatMessage.session_id == uuid.UUID(sid)).order_by(ChatMessage.created_at)
+        ).all()
+        db.expunge_all()
+        return list(rows)
+    finally:
+        db.close()
 
 
 # ── 요약 확인 후 접수 (신고 흐름 개편 4-1) ────────────────────────────────────
@@ -519,7 +558,7 @@ def test_inquiry_returns_sse(client: TestClient) -> None:
     assert res.status_code == 200
     events = [json.loads(line[6:]) for line in res.text.splitlines() if line.startswith("data: ")]
     assert "delta" in events[0]
-    assert events[-1] == {"done": True, "sources": []}
+    assert events[-1]["done"] is True and len(events[-1]["sources"]) == 2  # 가짜 답변기의 근거 (1-4c)
 
 
 def test_ai_failure_returns_503(client: TestClient) -> None:
@@ -1045,3 +1084,39 @@ def test_form_values_are_masked(client: TestClient) -> None:
     report = get_report(done["report"]["display_no"])
     assert "010-1234-5678" not in report.description and "***" in report.description
     assert "01012345678" not in (report.detail or "")
+
+
+# ── 행정 문의 RAG 답변과 근거 (1-4c) ──────────────────────────────────────────
+def test_inquiry_answer_streams_sources_and_saves_them(client: TestClient) -> None:
+    sid = new_session(client)
+    res = send(client, sid, "휴학 신청 어떻게 해요?")
+    assert res.headers["content-type"].startswith("text/event-stream")
+    events = sse_events(res)
+    assert sse_text(res) == ANSWER.answer
+    assert events[-1] == {
+        "done": True,
+        "sources": [
+            {"title": "학칙 제29조(휴학)", "article_no": "제29조", "url": "https://x.kr/r#29"},
+            {"title": "휴학 안내", "article_no": None, "url": None},
+        ],
+    }
+    user, bot = saved_messages(sid)
+    assert bot.content == ANSWER.answer and bot.sources == events[-1]["sources"] and user.sources is None
+
+
+def test_inquiry_ai_failure_returns_503_without_bot_message(client: TestClient) -> None:
+    sid = new_session(client)
+    res = send(client, sid, "RAG 장애 문의")
+    assert res.status_code == 503
+    msgs = saved_messages(sid)
+    assert [m.role.value for m in msgs] == ["user"] and msgs[0].intent is None
+    assert (msgs[0].debug_payload or {}).get("error") == "rag_unavailable"
+
+
+def test_switch_to_inquiry_answers_the_first_report_sentence(client: TestClient) -> None:
+    sid = new_session(client)
+    begin(client, sid, "물이 계속 새요")
+    ANSWER_QUESTIONS.clear()
+    res = send(client, sid, "안내만 받을래요", action="switch_to_inquiry")
+    assert sse_events(res)[-1]["sources"]
+    assert ANSWER_QUESTIONS == ["물이 계속 새요"]

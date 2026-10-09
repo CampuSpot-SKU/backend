@@ -54,8 +54,10 @@ from app.services.ai_client import (
     HistoryItem,
     IntentResult,
     JudgeResult,
+    RagAnswer,
     classify_intent,
     judge_report,
+    rag_answer,
     report_turn,
     say_text,
 )
@@ -105,11 +107,6 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 HISTORY_LOOKBACK = 30  # 진행 중인 신고를 재구성할 때 볼 최근 메시지 수 (되묻기·요약·정정 몇 번을 포함해도 충분)
 DEFAULT_CLARIFY = "무엇에 대해 말씀하시는 건지 조금 더 알려주시겠어요?"
-# 행정문의 RAG(작업 1-4)가 붙기 전까지 쓰는 임시 답변 — 1-4에서 ai /rag/answer 스트리밍으로 교체
-INQUIRY_PLACEHOLDER = (
-    "행정 문의 답변 기능은 아직 준비 중이에요. 곧 학칙·공지를 근거로 답변해 드릴게요!"
-)
-
 IntentClassifier = Callable[[str, list[HistoryItem]], IntentResult]
 # (종류, 기본 문구, 남아 있어야 할 표현, 최근 대화) → 말투를 다듬은 문구. 실패하면 기본 문구
 Phraser = Callable[[str, str, list[str], list[HistoryItem]], str]
@@ -117,6 +114,8 @@ Phraser = Callable[[str, str, list[str], list[HistoryItem]], str]
 Judger = Callable[[str, str | None, list[str]], JudgeResult]
 Phrase = Callable[[str, str, list[str]], str]
 Agent = ra.Agent  # 대화 맥락을 미리 채운 형태
+# 질문 → 근거 기반 답변 + sources (1-4c). 실패하면 AiServiceError
+Answerer = Callable[[str], RagAnswer]
 Judge = Callable[[ReportSlots, str], ReportSlots]  # 규칙으로 뽑은 슬롯 → AI 판정을 반영한 슬롯
 # 접수된 신고 id → 대기 사진을 옮긴 저장소 경로(사진 없음·저장소 실패면 None) — 작업 1-10
 AttachPhoto = Callable[[uuid.UUID], str | None]
@@ -138,6 +137,11 @@ def get_phraser() -> Phraser:
     return say_text
 
 
+def get_answerer() -> Answerer:
+    """테스트에서 app.dependency_overrides로 가짜 답변기로 바꿔 끼우기 위한 의존성."""
+    return rag_answer
+
+
 def get_agent() -> Agent:
     """신고 대화 에이전트(ai /report/turn). 테스트에서 가짜로 바꿔 끼우기 위한 의존성."""
     return report_turn
@@ -149,6 +153,7 @@ Classifier = Annotated[IntentClassifier, Depends(get_intent_classifier)]
 PhraserDep = Annotated[Phraser, Depends(get_phraser)]
 JudgerDep = Annotated[Judger, Depends(get_judger)]
 AgentDep = Annotated[Agent, Depends(get_agent)]
+AnswererDep = Annotated[Answerer, Depends(get_answerer)]
 PhotoStorageDep = Annotated[PhotoStorage, Depends(get_photo_storage)]
 
 
@@ -231,6 +236,7 @@ def send_message(
     judger: JudgerDep,
     agent: AgentDep,
     photos: PhotoStorageDep,
+    answerer: AnswererDep,
 ) -> ChatReply | StreamingResponse:
     if db.get(ChatSession, session_id) is None:
         raise HTTPException(status_code=404, detail="대화 세션을 찾을 수 없어요.")
@@ -279,7 +285,7 @@ def send_message(
 
     # 신고 흐름에서 빠져나와 안내만 받기 — 버튼 또는 글자
     if action == "switch_to_inquiry" or (draft.in_progress and wants_inquiry(text)):
-        return _switch_to_inquiry(db, session_id, user_msg, draft)
+        return _switch_to_inquiry(db, session_id, user_msg, draft, answerer)
 
     # 1-0) 에이전트가 진행하던 신고 대화 → 에이전트가 이어서 처리 (실패하면 아래 규칙 기반 흐름으로 대체)
     if draft.in_progress and draft.last_kind == ra.AGENT_KIND:
@@ -383,12 +389,7 @@ def send_message(
         return Unclear(clarifying_question=question)
 
     if result.intent == "inquiry":
-        user_msg.intent = ChatIntent.INQUIRY
-        reply = _add_message(db, session_id, ChatRole.ASSISTANT, INQUIRY_PLACEHOLDER,
-                             _after(user_msg))
-        reply.intent = ChatIntent.INQUIRY
-        db.commit()
-        return StreamingResponse(_sse_once(INQUIRY_PLACEHOLDER), media_type="text/event-stream")
+        return _inquiry_reply(db, session_id, user_msg, text, answerer)
 
     # 3) 신고 — 에이전트가 먼저 걸러내고(말이 안 되거나 확인이 필요하면 확인 질문부터) 필요한 것만 묻는다.
     #    바로 앞이 에이전트의 거절이었는데 학생이 다시 말하면 그 대화를 이어서 본다 (멀쩡한 신고를 막지 않음)
@@ -543,20 +544,36 @@ def _just_reported(history: list[ChatMessage]) -> bool:
     )
 
 
-def _switch_to_inquiry(
-    db: Session, session_id: uuid.UUID, user_msg: ChatMessage, draft: Draft
+def _inquiry_reply(
+    db: Session, session_id: uuid.UUID, user_msg: ChatMessage, question: str, answerer: Answerer
 ) -> StreamingResponse:
-    """[안내만 받을래요] — 신고 흐름을 끝내고 첫 발화를 행정문의로 답변.
+    """행정 문의 — 학칙·안내·공지를 근거로 답하고 근거(sources)를 함께 저장·전달 (1-4c, 명세 5-1).
 
-    intent=행정문의로 저장하면 collect_draft가 신고 흐름 끝으로 봄.
-    TODO(1-4): 행정문의 RAG가 붙으면 첫 신고 문장(`draft.user_texts[0]`, 없으면 이번 메시지)으로
-    답변을 만들 것 — 지금은 임시 문구.
+    intent=행정문의로 저장하면 collect_draft가 신고 흐름 끝으로 봄. 답변을 못 만들면 의도는 저장하지 않고
+    (신고 흐름을 그대로 둠) 503 — 학생이 같은 버튼·질문을 다시 보낼 수 있다.
     """
+    try:
+        result = answerer(question)
+    except AiServiceError as e:
+        user_msg.debug_payload = {**(user_msg.debug_payload or {}), "error": "rag_unavailable",
+                                  "detail": str(e)[:500]}
+        db.commit()
+        raise HTTPException(status_code=503, detail="잠시 후 다시 시도해주세요") from None
+    sources = [s.model_dump() for s in result.sources]
     user_msg.intent = ChatIntent.INQUIRY
-    reply = _add_message(db, session_id, ChatRole.ASSISTANT, INQUIRY_PLACEHOLDER, _after(user_msg))
+    reply = _add_message(db, session_id, ChatRole.ASSISTANT, result.answer, _after(user_msg))
     reply.intent = ChatIntent.INQUIRY
+    reply.sources = sources
     db.commit()
-    return StreamingResponse(_sse_once(INQUIRY_PLACEHOLDER), media_type="text/event-stream")
+    return StreamingResponse(_sse_once(result.answer, sources), media_type="text/event-stream")
+
+
+def _switch_to_inquiry(
+    db: Session, session_id: uuid.UUID, user_msg: ChatMessage, draft: Draft, answerer: Answerer
+) -> StreamingResponse:
+    """[안내만 받을래요] — 신고 흐름을 끝내고 첫 발화(`draft.user_texts[0]`, 없으면 이번 메시지)를 행정문의로 답변."""
+    question = draft.user_texts[0] if draft.user_texts else user_msg.content
+    return _inquiry_reply(db, session_id, user_msg, question, answerer)
 
 
 def _slots_filled(slots: ReportSlots, description: str | None) -> SlotsFilled:
@@ -753,7 +770,7 @@ def _after(msg: ChatMessage) -> datetime:
     return max(datetime.now(UTC), msg.created_at + timedelta(microseconds=1))
 
 
-def _sse_once(text: str) -> Iterator[str]:
-    """답변 전체를 delta 한 번 + done 이벤트로 보냄 (1-4에서 진짜 스트리밍으로 교체)."""
+def _sse_once(text: str, sources: list[dict[str, object]] | None = None) -> Iterator[str]:
+    """답변 전체를 delta 한 번 + done 이벤트(근거 sources 포함)로 보냄 (ai 쪽 실시간 스트리밍은 3순위 1-22)."""
     yield f"data: {json.dumps({'delta': text}, ensure_ascii=False)}\n\n"
-    yield f"data: {json.dumps({'done': True, 'sources': []})}\n\n"
+    yield f"data: {json.dumps({'done': True, 'sources': sources or []}, ensure_ascii=False)}\n\n"

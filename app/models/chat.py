@@ -36,4 +36,6 @@ class ChatMessage(Base):
     intent_scores: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     # 신뢰도 낮거나 예외 발생 시에만 원본 프롬프트/응답 저장, 평소엔 null (명세서 11장)
     debug_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # 행정 문의 답변의 근거 [{"title","article_no","url"}] — 문의 로그(1-18)와 SSE done 이벤트가 같은 형식 (1-4c, 명세 5-1)
+    sources: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = created_at()

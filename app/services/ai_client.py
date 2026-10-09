@@ -199,3 +199,34 @@ def report_turn(
     except (httpx.HTTPError, ValidationError, ValueError) as e:
         logger.warning("ai report turn 실패: %s", e)
         raise AiServiceError(str(e)) from e
+
+
+RAG_TIMEOUT_SECONDS = 30.0  # 검색(임베딩) + Gemini 답변 + 재시도 1회. 실패하면 503 (잠시 후 다시 시도)
+
+
+class RagSource(BaseModel):
+    title: str
+    article_no: str | None = None
+    url: str | None = None
+
+
+class RagAnswer(BaseModel):
+    """ai `POST /api/v1/rag/answer` 응답 (1-4c) — sources는 근거가 없으면 빈 목록."""
+
+    answer: str
+    sources: list[RagSource] = []
+
+
+def rag_answer(question: str) -> RagAnswer:
+    """행정 문의에 학칙·안내·공지를 근거로 한 답변. 실패하면 AiServiceError (호출한 쪽이 503)."""
+    url = _endpoint("/rag/answer")
+    headers = {"X-Internal-Secret": get_settings().ai_service_secret}
+    try:
+        res = httpx.post(
+            url, json={"question": mask_pii(question)[:1000]}, headers=headers, timeout=RAG_TIMEOUT_SECONDS
+        )
+        res.raise_for_status()
+        return RagAnswer.model_validate(res.json())
+    except (httpx.HTTPError, ValidationError, ValueError) as e:
+        logger.warning("ai rag answer 실패: %s", e)
+        raise AiServiceError(str(e)) from e
