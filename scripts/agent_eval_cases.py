@@ -135,7 +135,7 @@ CASES: list[Case] = [
     c("G2", "층 되묻기", "북악관 화장실 휴지가 없어요", action=["ask"], building="북악관", any_msg=["층"]),
     c("G3", "층 되묻기", "혜인관 복도 불이 나갔어요", action=["ask"], building="혜인관", any_msg=["층"]),
     c("G4", "층 되묻기", "청운관 계단 난간이 흔들려요", action=["ask"], building="청운관", any_msg=["층"]),
-    c("G5", "층 되묻기", "북악관 로비 정수기가 고장났어요", action=["ask"], building="북악관", any_msg=["층"]),
+    c("G5", "층 되묻기", "북악관 정수기가 고장났어요", action=["ask"], building="북악관", any_msg=["층"]),
     c("G6", "층 되묻기", ["청운관 화장실 더러움", "모르겠어요"], action=["confirm"], building="청운관", floor=""),
     c("G7", "층 되묻기", ["청운관 화장실 더러움", "3층이요"], action=["confirm"], building="청운관", floor="3"),
     c("G8", "층 되묻기", "북악관 엘리베이터가 고장났어요", action=["confirm"], building="북악관", no_msg=list(FLOOR_Q)),
