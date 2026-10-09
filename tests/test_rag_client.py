@@ -33,11 +33,12 @@ def test_rag_answer_parses_sources_and_masks_question(monkeypatch: pytest.Monkey
 
     def post(url: str, **kw: Any) -> FakeResponse:
         sent.update(url=url, **kw)
-        return FakeResponse({"answer": "답", "sources": [{"title": "학칙 제29조", "article_no": "제29조", "url": None}]})
+        return FakeResponse({"answer": "답", "sources": [{"title": "학칙 제29조", "article_no": "제29조", "url": None, "as_of": "2025.10.1 기준"}]})
 
     monkeypatch.setattr(httpx, "post", post)
     out = rag_answer("제 학번은 20201234 휴학은요?")
     assert out.answer == "답" and out.sources[0].article_no == "제29조" and out.sources[0].url is None
+    assert out.sources[0].as_of == "2025.10.1 기준"
     assert sent["url"] == "http://ai/api/v1/rag/answer" and sent["headers"] == {"X-Internal-Secret": "s"}
     assert "20201234" not in sent["json"]["question"]
 

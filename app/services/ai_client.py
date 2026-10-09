@@ -224,6 +224,7 @@ class RagSource(BaseModel):
     title: str
     article_no: str | None = None
     url: str | None = None
+    as_of: str | None = None  # 규정은 '2025.10.1 기준', 개정 공지는 '2026.1.19 게시' (1-4f) — 칩에 같이 표시
 
 
 class RagAnswer(BaseModel):

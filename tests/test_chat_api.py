@@ -75,7 +75,7 @@ FAKE: dict[str, IntentResult] = {
 # 가짜 RAG 답변 (1-4c) — ai를 부르지 않고 질문별로 정해 둔 답과 근거를 돌려줌
 ANSWER = RagAnswer(
     answer="학칙 제29조에 따르면 휴학은 학기 시작 전에 신청해야 해요.",
-    sources=[RagSource(title="학칙 제29조(휴학)", article_no="제29조", url="https://x.kr/r#29"),
+    sources=[RagSource(title="학칙 제29조(휴학)", article_no="제29조", url="https://x.kr/r#29", as_of="2025.10.1 기준"),
              RagSource(title="휴학 안내")],
 )
 ANSWER_QUESTIONS: list[str] = []
@@ -1098,8 +1098,9 @@ def test_inquiry_answer_streams_sources_and_saves_them(client: TestClient) -> No
     assert events[-1] == {
         "done": True,
         "sources": [
-            {"title": "학칙 제29조(휴학)", "article_no": "제29조", "url": "https://x.kr/r#29"},
-            {"title": "휴학 안내", "article_no": None, "url": None},
+            {"title": "학칙 제29조(휴학)", "article_no": "제29조", "url": "https://x.kr/r#29",
+             "as_of": "2025.10.1 기준"},
+            {"title": "휴학 안내", "article_no": None, "url": None, "as_of": None},
         ],
     }
     user, bot = saved_messages(sid)
