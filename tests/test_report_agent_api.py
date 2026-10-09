@@ -49,7 +49,7 @@ def fake_classifier(text, history):  # type: ignore[no-untyped-def]
     return IntentResult(intent="report", report_score=90, inquiry_score=10)
 
 
-def fake_judger(text, location, categories):  # type: ignore[no-untyped-def]
+def fake_judger(text, location, categories, photo=None):  # type: ignore[no-untyped-def]
     raise AiServiceError("judge down")  # 규칙 기반 판정으로 대체
 
 

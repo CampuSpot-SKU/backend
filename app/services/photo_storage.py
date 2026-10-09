@@ -110,6 +110,30 @@ class PhotoStorage:
         if res.status_code >= 300:
             raise StorageError(f"upload failed: HTTP {res.status_code}")
 
+    def download_pending(self, session_id: uuid.UUID) -> tuple[bytes, str] | None:
+        """대기 사진 내용 — AI 사진 분석(1-10)용. (바이트, 실제 형식) / 사진 없음·미설정 → None / 그 밖의 실패 → StorageError.
+
+        형식은 저장 때 정한 Content-Type이 아니라 첫 바이트로 다시 판별하고, 5MB를 넘거나 jpg/png가 아니면 None."""
+        if not self.configured:
+            return None
+        try:
+            res = httpx.get(
+                self._object_url(pending_key(session_id)),
+                headers=self._headers(),
+                timeout=UPLOAD_TIMEOUT_SECONDS,
+            )
+        except httpx.HTTPError as e:
+            raise StorageError(f"download failed: {type(e).__name__}") from e
+        if _is_not_found(res):
+            return None
+        if res.status_code >= 300:
+            raise StorageError(f"download failed: HTTP {res.status_code}")
+        data = res.content
+        content_type = sniff_image_type(data)
+        if content_type is None or len(data) > MAX_BYTES:
+            return None
+        return data, content_type
+
     def delete_pending(self, session_id: uuid.UUID) -> None:
         """대기 사진 삭제. 없어도 성공. 미설정이면 지울 것도 없으니 그냥 끝. 그 밖의 실패 → StorageError."""
         if not self.configured:

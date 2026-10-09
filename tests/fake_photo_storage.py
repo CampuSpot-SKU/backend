@@ -21,6 +21,9 @@ class FakePhotoStorage(PhotoStorage):
     def upload_pending(self, session_id: uuid.UUID, data: bytes, content_type: str) -> None:
         self.pending[session_id] = (data, content_type)
 
+    def download_pending(self, session_id: uuid.UUID) -> tuple[bytes, str] | None:
+        return self.pending.get(session_id)
+
     def delete_pending(self, session_id: uuid.UUID) -> None:
         self.pending.pop(session_id, None)
 

@@ -91,7 +91,9 @@ def fake_answerer(question: str) -> RagAnswer:
 JUDGE: dict[str, Any] = {"result": None, "calls": []}
 
 
-def fake_judger(text: str, location: str | None, categories: list[str]) -> JudgeResult:
+def fake_judger(
+    text: str, location: str | None, categories: list[str], photo: object = None
+) -> JudgeResult:
     JUDGE["calls"].append({"text": text, "location": location, "categories": categories})
     if JUDGE["result"] is None:
         raise AiServiceError("ai judge down")

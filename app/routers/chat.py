@@ -54,6 +54,7 @@ from app.services.ai_client import (
     HistoryItem,
     IntentResult,
     JudgeResult,
+    PhotoData,
     RagAnswer,
     classify_intent,
     judge_report,
@@ -111,7 +112,7 @@ IntentClassifier = Callable[[str, list[HistoryItem]], IntentResult]
 # (종류, 기본 문구, 남아 있어야 할 표현, 최근 대화) → 말투를 다듬은 문구. 실패하면 기본 문구
 Phraser = Callable[[str, str, list[str], list[HistoryItem]], str]
 # (신고 내용, 확인된 위치, 카테고리 이름들) → AI 판정 (1-3b). 실패하면 AiServiceError
-Judger = Callable[[str, str | None, list[str]], JudgeResult]
+Judger = Callable[[str, str | None, list[str], PhotoData | None], JudgeResult]
 Phrase = Callable[[str, str, list[str]], str]
 Agent = ra.Agent  # 대화 맥락을 미리 채운 형태
 # 질문 → 근거 기반 답변 + sources (1-4c). 실패하면 AiServiceError
@@ -261,8 +262,19 @@ def send_message(
     def phrase(kind: str, base: str, must: list[str]) -> str:
         return phraser(kind, base, must, say_history)
 
+    pending_photo: list[PhotoData | None] = []  # 이 요청에서 대기 사진을 한 번만 가져오려는 캐시 (1-10)
+
+    def judge_photo() -> PhotoData | None:
+        if not pending_photo:
+            try:
+                pending_photo.append(photos.download_pending(session_id))
+            except StorageError as e:  # 사진을 못 가져와도 글로 판정 — 접수는 막지 않음
+                logger.warning("판정용 대기 사진 가져오기 실패: %s", e)
+                pending_photo.append(None)
+        return pending_photo[0]
+
     def judge(slots: ReportSlots, judged_text: str) -> ReportSlots:
-        return _judged(db, slots, judged_text, judger)
+        return _judged(db, slots, judged_text, judger, judge_photo)
 
     def attach(report_id: uuid.UUID) -> str | None:
         # 사진 저장소 문제로 신고 접수가 실패하면 안 됨 → 로그만 남기고 사진 없이 접수 (작업 1-10)
@@ -691,10 +703,17 @@ def _report_step(
     )
 
 
-def _judged(db: Session, slots: ReportSlots, text: str, judger: Judger) -> ReportSlots:
-    """규칙으로 뽑은 슬롯에 AI 판정을 덮어씀 (1-3b). AI가 실패하면 규칙 기반 값을 그대로 씀 (명세 11장)."""
+def _judged(
+    db: Session,
+    slots: ReportSlots,
+    text: str,
+    judger: Judger,
+    photo: Callable[[], PhotoData | None] | None = None,
+) -> ReportSlots:
+    """규칙으로 뽑은 슬롯에 AI 판정을 덮어씀 (1-3b). AI가 실패하면 규칙 기반 값을 그대로 씀 (명세 11장).
+    대기 사진이 있으면 함께 보내 AI가 사진도 보고 판정함 (1-10)."""
     try:
-        result = judger(text, slots.location_text, load_category_names(db))
+        result = judger(text, slots.location_text, load_category_names(db), photo() if photo else None)
     except AiServiceError as e:
         logger.warning("AI 판정 실패 → 규칙 기반 판정 사용: %s", e)
         return slots

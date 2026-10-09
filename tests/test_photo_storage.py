@@ -80,6 +80,10 @@ class FakeHttp:
         self.calls.append({"method": "POST", "url": url, **kw})
         return self._res("POST", url)
 
+    def get(self, url: str, **kw: Any) -> httpx.Response:
+        self.calls.append({"method": "GET", "url": url, **kw})
+        return self._res("GET", url)
+
     def delete(self, url: str, **kw: Any) -> httpx.Response:
         self.calls.append({"method": "DELETE", "url": url, **kw})
         return self._res("DELETE", url)
@@ -89,6 +93,7 @@ class FakeHttp:
 def http(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeHttp]:
     fake = FakeHttp()
     monkeypatch.setattr(ps.httpx, "post", fake.post)
+    monkeypatch.setattr(ps.httpx, "get", fake.get)
     monkeypatch.setattr(ps.httpx, "delete", fake.delete)
     yield fake
 
@@ -286,3 +291,36 @@ def test_bad_session_id_is_422(route: tuple[TestClient, _Db, FakeStorage]) -> No
     client, _, _ = route
     res = client.post("/api/v1/chat/sessions/not-a-uuid/photo", files={"file": ("a", JPEG_HEAD)})
     assert res.status_code == 422
+
+
+# ---------- AI 사진 분석용 내려받기 (1-10) ----------
+
+def test_download_pending_returns_bytes_and_sniffed_type(http: FakeHttp) -> None:
+    sid = uuid.uuid4()
+    http.text = ""
+    data = PNG_HEAD + b"abc"
+    orig = http._res
+    http._res = lambda m, u: httpx.Response(200, content=data, request=httpx.Request(m, u))  # type: ignore[method-assign]
+    assert storage().download_pending(sid) == (data, "image/png")
+    assert http.calls[0]["url"] == f"{URL}/storage/v1/object/report-photos/pending/{sid}/photo"
+    http._res = orig  # type: ignore[method-assign]
+
+
+def test_download_pending_missing_is_none(http: FakeHttp) -> None:
+    http.status, http.text = 404, '{"error":"x"}'
+    assert storage().download_pending(uuid.uuid4()) is None
+
+
+def test_download_pending_server_error_raises(http: FakeHttp) -> None:
+    http.status = 500
+    with pytest.raises(StorageError):
+        storage().download_pending(uuid.uuid4())
+
+
+def test_download_pending_unconfigured_is_none() -> None:
+    assert PhotoStorage("", "").download_pending(uuid.uuid4()) is None
+
+
+def test_download_pending_rejects_non_image(http: FakeHttp) -> None:
+    http.text = "hello"
+    assert storage().download_pending(uuid.uuid4()) is None

@@ -158,3 +158,14 @@ def test_report_turn_sends_masked(sent: Sent) -> None:
     _assert_clean(payload)
     assert payload["buildings"] == [{"name": "북악관"}]  # 학교 데이터는 그대로
     assert "3동 2층 화장실" in payload["conversation"][0]["content"]  # 위치는 안 지워짐
+
+
+def test_judge_report_with_photo_sends_base64(sent: Sent) -> None:
+    sent.reply = {"category": "시설·설비", "impact": "high", "urgency": "low",
+                  "problem_stated": True, "reason": "누수", "photo_note": "천장 얼룩"}
+    res = ai_client.judge_report("물이 새요", "3동 2층", ["시설·설비"], (b"\xff\xd8\xff", "image/jpeg"))
+    assert res.photo_note == "천장 얼룩"
+    assert sent.payloads[0]["photo_mime"] == "image/jpeg"
+    assert sent.payloads[0]["photo_base64"] == "/9j/"
+    ai_client.judge_report("물이 새요", "3동 2층", ["시설·설비"])
+    assert "photo_base64" not in sent.payloads[1]

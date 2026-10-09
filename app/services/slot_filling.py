@@ -587,6 +587,9 @@ def apply_judgement(slots: ReportSlots, judgement: JudgementLike | None, text: s
     reason: str | None = judgement.reason
     if urgency == Level.LOW and any(w in lowered for w in EMERGENCY_WORDS):
         urgency, reason = Level.HIGH, None
+    photo_note = getattr(judgement, "photo_note", None)
+    if photo_note and reason:
+        reason = f"{reason} (사진: {photo_note})"
     impact = Level.HIGH if judgement.impact == "high" and slots.location_text else Level.LOW
     return replace(
         slots,

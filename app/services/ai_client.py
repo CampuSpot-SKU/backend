@@ -4,6 +4,7 @@
 - Gemini 재시도는 ai 서비스 안에서 이미 1회 하므로 여기선 재시도하지 않는다.
 - 실패하면 AiServiceError → 라우터가 503 "잠시 후 다시 시도해주세요"로 응답 (명세서 11장).
 """
+import base64
 import logging
 from typing import Literal
 
@@ -99,6 +100,7 @@ def say_text(kind: str, base_text: str, must_include: list[str], history: list[H
 
 
 JUDGE_TIMEOUT_SECONDS = 10.0  # 판정은 실패해도 규칙 기반으로 대체되므로 오래 기다리지 않음
+JUDGE_PHOTO_TIMEOUT_SECONDS = 25.0  # 사진이 붙으면 이미지 전송·분석 때문에 더 걸림 (1-10)
 
 
 class JudgeResult(BaseModel):
@@ -109,15 +111,29 @@ class JudgeResult(BaseModel):
     urgency: Literal["high", "low"]
     problem_stated: bool
     reason: str
+    photo_note: str | None = None  # 사진에서 보이는 상황 한 줄 (사진이 없거나 AI가 쓸 수 없으면 없음, 1-10)
 
 
-def judge_report(text: str, location: str | None, categories: list[str]) -> JudgeResult:
-    """신고 내용의 카테고리·영향도·긴급도·이유를 AI가 판정. 실패하면 AiServiceError (호출한 쪽이 규칙 기반으로 대체)."""
+PhotoData = tuple[bytes, str]  # (사진 바이트, "image/jpeg" | "image/png")
+
+
+def judge_report(
+    text: str, location: str | None, categories: list[str], photo: PhotoData | None = None
+) -> JudgeResult:
+    """신고 내용(+사진)의 카테고리·영향도·긴급도·이유를 AI가 판정. 실패하면 AiServiceError (호출한 쪽이 규칙 기반으로 대체)."""
     url = _endpoint("/report/judge")
-    payload = {"text": mask_pii(text)[:2000], "location": mask_optional(location), "categories": categories}
+    payload: dict[str, object] = {
+        "text": mask_pii(text)[:2000],
+        "location": mask_optional(location),
+        "categories": categories,
+    }
+    if photo is not None:
+        payload["photo_base64"] = base64.b64encode(photo[0]).decode("ascii")
+        payload["photo_mime"] = photo[1]
     headers = {"X-Internal-Secret": get_settings().ai_service_secret}
+    timeout = JUDGE_PHOTO_TIMEOUT_SECONDS if photo is not None else JUDGE_TIMEOUT_SECONDS
     try:
-        res = httpx.post(url, json=payload, headers=headers, timeout=JUDGE_TIMEOUT_SECONDS)
+        res = httpx.post(url, json=payload, headers=headers, timeout=timeout)
         res.raise_for_status()
         return JudgeResult.model_validate(res.json())
     except (httpx.HTTPError, ValidationError, ValueError) as e:
