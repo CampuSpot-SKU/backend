@@ -2,12 +2,14 @@
 import uuid
 from datetime import datetime
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import BigInteger, DateTime, ForeignKey, Identity, Index, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 from app.models._common import created_at, pg_enum, uuid_pk
 from app.models.enums import Priority, ReportStatus
+from app.models.knowledge import EMBEDDING_DIM
 
 
 class Report(Base):
@@ -40,6 +42,10 @@ class Report(Base):
     detail: Mapped[str | None] = mapped_column(String(100))  # "화장실" 등
     location_raw: Mapped[str | None] = mapped_column(Text)
     description: Mapped[str] = mapped_column(Text, nullable=False)
+    # 설명 임베딩(1-8b) — ai 탐지 배치가 채움. 접수 경로는 안 씀. 768개 숫자라 목록·상세 조회엔 안 딸려 오게 deferred
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(EMBEDDING_DIM), nullable=True, deferred=True
+    )
     photo_url: Mapped[str | None] = mapped_column(Text)
     assigned_dept: Mapped[str | None] = mapped_column(String(100))
     sla_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
