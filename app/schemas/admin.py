@@ -74,6 +74,29 @@ class AdminReportDetail(AdminReportItem):
     status_history: list[StatusHistoryItem]
 
 
+class SimilarReport(BaseModel):
+    """유사 사례 한 건 — 같은 카테고리의 해결·종료된 과거 신고 (1-8c)."""
+
+    id: uuid.UUID
+    display_no: int
+    category: NamedRef
+    building: NamedRef | None
+    floor: str | None
+    detail: str | None
+    location_raw: str | None
+    description: str
+    status: ReportStatus
+    created_at: datetime
+    resolved_at: datetime | None  # 마지막으로 '해결'된 시각
+    resolution_memo: str | None  # 그때 남긴 처리 메모
+    distance: float  # 설명 임베딩 코사인 거리 (0에 가까울수록 비슷), 소수 3자리
+
+
+class SimilarReportList(BaseModel):
+    embedding_ready: bool  # false = 이 신고의 임베딩이 아직 없음(접수 다음 날 탐지 배치가 채움) → items 빈 목록
+    items: list[SimilarReport]  # 가까운 순, 최대 limit건
+
+
 class StatusChangeIn(BaseModel):
     to_status: ReportStatus
     memo: str | None = Field(default=None, max_length=1000, examples=["시설팀 배정, 오후 방문 예정"])

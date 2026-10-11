@@ -17,6 +17,7 @@ from app.schemas.admin import (
     AdminReportDetail,
     AdminReportList,
     LoginIn,
+    SimilarReportList,
     SlaStatus,
     SortKey,
     StatusChangeIn,
@@ -31,6 +32,7 @@ from app.services.auth import (
 from app.services.photo_storage import PhotoStorage, get_photo_storage
 from app.services.report_query import get_report_detail, list_reports
 from app.services.report_workflow import InvalidTransitionError, change_status
+from app.services.similar_query import find_similar
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -129,3 +131,21 @@ def patch_report_status(
     assert detail is not None
     # 화면은 이 응답으로 상세를 갈아끼우므로 사진도 상세 조회와 똑같이 임시 링크로
     return _with_photo_link(detail, photos)
+
+
+@router.get(
+    "/reports/{report_id}/similar",
+    response_model=SimilarReportList,
+    responses={**_AUTH_ERRORS, 404: {"description": "신고 없음"}},
+)
+def get_similar_reports(
+    report_id: uuid.UUID,
+    db: DbSession,
+    _admin: CurrentAdmin,
+    limit: Annotated[int, Query(ge=1, le=10)] = 5,
+) -> SimilarReportList:
+    """유사 사례 — 같은 카테고리의 해결·종료된 과거 신고 중 설명이 비슷한 것 + 처리 메모 (1-8c, 명세 3-3)."""
+    result = find_similar(db, report_id, limit=limit)
+    if result is None:
+        raise HTTPException(status_code=404, detail="신고를 찾을 수 없어요.")
+    return result
