@@ -64,7 +64,12 @@ from app.services.ai_client import (
 )
 from app.services.photo_storage import PhotoStorage, StorageError, get_photo_storage
 from app.services.pii_mask import mask_optional, mask_pii
-from app.services.report_service import create_report, load_buildings, load_category_names
+from app.services.report_service import (
+    create_report,
+    load_buildings,
+    load_category_names,
+    rule_note,
+)
 from app.services.slot_filling import (
     ASK_EDIT,
     CANCELLED,
@@ -730,7 +735,7 @@ def _create(
     extra: str = "",
     choices: list[str] | None = None,
 ) -> ReportCreated:
-    report, category = create_report(db, session_id, slots, description=description)
+    report, category, rule = create_report(db, session_id, slots, description=description)
     photo_path = attach(report.id)  # 대기 사진이 있으면 이 신고로 옮김 (1-10)
     if photo_path:
         report.photo_url = photo_path  # URL이 아니라 저장소 경로 — 관리자 조회 때 임시 링크로 바꿈
@@ -738,7 +743,7 @@ def _create(
     done = (
         f"{DONE_PREFIX}! 접수번호는 {report.display_no}번이에요. "
         f"{where}{category.name} 문제로 분류했어요. "
-        f"{judge_reason(slots, report.priority.value)} 담당 부서에서 확인 후 처리할게요.{extra}"
+        f"{judge_reason(slots, report.priority.value)}{rule_note(rule)} 담당 부서에서 확인 후 처리할게요.{extra}"
         f"{PHOTO_SENT if photo_path else ''}"
     )
     # intent 없이 저장 → 신고 흐름 끝 표시 (다음 메시지는 새 대화로 시작)

@@ -1,19 +1,30 @@
-"""관리자 설정 조회·저장 — 카테고리·건물·우선순위 매트릭스·SLA·탐지 임계치 (작업 1-17, 명세서 5-1).
+"""관리자 설정 조회·저장 — 카테고리·건물·우선순위 매트릭스·SLA·탐지 임계치(작업 1-17)·조건-액션 규칙(1-21), 명세서 5-1.
 
 새 신고는 접수할 때마다 이 설정 테이블을 읽으므로(report_service.py), 여기서 저장하면 다음 신고부터 반영된다.
 PUT은 전체를 한 번에 검사한 뒤 전부 저장하거나(커밋은 라우터) 전부 거절한다(ConfigRuleError → 409).
 """
 import uuid
 from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
 
-from app.models.config import Building, Category, DetectionConfig, PriorityMatrixRule, SlaConfig
+from app.models.config import (
+    AutomationRule,
+    Building,
+    Category,
+    DetectionConfig,
+    PriorityMatrixRule,
+    SlaConfig,
+)
 from app.models.enums import Level, Priority
 from app.models.problem import PredictionStat, ProblemCluster
 from app.models.report import Report
+from app.schemas.admin import NamedRef
 from app.schemas.config import (
+    AutomationRuleIn,
+    AutomationRuleItem,
     BuildingIn,
     BuildingItem,
     CategoryIn,
@@ -199,4 +210,66 @@ def save_detection(db: Session, body: DetectionSettings) -> None:
         db.add(DetectionConfig(threshold_count=body.threshold_count, threshold_hours=body.threshold_hours))
     else:
         row.threshold_count, row.threshold_hours = body.threshold_count, body.threshold_hours
+    db.flush()
+
+
+# ── 조건-액션 규칙 ── (1-21. 목록에서 빠진 규칙은 삭제)
+class ConfigReferenceError(Exception):
+    """없는 category_id·building_id → 422 (명세 5-1)."""
+
+
+def list_automation_rules(db: Session) -> list[AutomationRuleItem]:
+    rows = db.execute(
+        select(AutomationRule, Category, Building)
+        .join(Category, AutomationRule.category_id == Category.id)
+        .outerjoin(Building, AutomationRule.building_id == Building.id)
+        .order_by(AutomationRule.created_at, AutomationRule.name)
+    ).all()
+    return [
+        AutomationRuleItem(
+            id=r.id,
+            name=r.name,
+            category=NamedRef(id=c.id, name=c.name),
+            building=NamedRef(id=b.id, name=b.name) if b else None,
+            resulting_priority=r.resulting_priority,
+            is_active=r.is_active,
+        )
+        for r, c, b in rows
+    ]
+
+
+def save_automation_rules(db: Session, items: list[AutomationRuleIn]) -> None:
+    _no_duplicates([i.name for i in items], "규칙 이름")
+    _no_duplicates([i.id for i in items if i.id], "규칙 id")
+    names = {c.id: c.name for c in db.scalars(select(Category)).all()}
+    buildings = {b.id: b.name for b in db.scalars(select(Building)).all()}
+    if bad := {str(i.category_id) for i in items if i.category_id not in names}:
+        raise ConfigReferenceError(f"없는 카테고리 id가 있어요: {', '.join(sorted(bad))}")
+    if bad := {str(i.building_id) for i in items if i.building_id and i.building_id not in buildings}:
+        raise ConfigReferenceError(f"없는 건물 id가 있어요: {', '.join(sorted(bad))}")
+    seen: set[tuple[uuid.UUID, uuid.UUID | None]] = set()
+    for i in items:
+        key = (i.category_id, i.building_id)
+        if key in seen:
+            where = buildings[i.building_id] if i.building_id else "모든 건물"
+            raise ConfigRuleError(f"'{names[i.category_id]}·{where}' 조건의 규칙이 두 번 들어 있어요.")
+        seen.add(key)
+    current = {r.id: r for r in db.scalars(select(AutomationRule).with_for_update()).all()}
+    given = {i.id for i in items if i.id}
+    if unknown := given - current.keys():
+        raise ConfigRuleError(f"없는 규칙 id가 있어요: {', '.join(map(str, unknown))}")
+    # 규칙은 다른 데이터가 참조하지 않으므로 전부 지우고 다시 넣는다 — 조건·이름을 서로 맞바꿔도 UNIQUE에 안 걸림.
+    # id가 있던 규칙은 같은 id·만든 시각을 그대로 쓴다(화면이 들고 있는 id 유지)
+    kept = {rid: r.created_at for rid, r in current.items()}
+    for r in current.values():
+        db.delete(r)
+    db.flush()
+    now = datetime.now(UTC)
+    for n, i in enumerate(items):
+        rule = AutomationRule(name=i.name, category_id=i.category_id, building_id=i.building_id,
+                              resulting_priority=i.resulting_priority, is_active=i.is_active,
+                              created_at=now + timedelta(microseconds=n))  # 새 규칙은 보낸 순서대로 목록에 나옴
+        if i.id:
+            rule.id, rule.created_at = i.id, kept[i.id]
+        db.add(rule)
     db.flush()

@@ -227,7 +227,7 @@ def test_matrix_and_sla_apply_to_new_reports(client: TestClient, headers: dict[s
     session = ChatSession(user_identifier=f"t-{TAG}")
     db.add(session)
     db.flush()
-    report, _ = create_report(db, session.id, ReportSlots(has_problem=True, impact=Level.HIGH, urgency=Level.HIGH),
+    report, _, _ = create_report(db, session.id, ReportSlots(has_problem=True, impact=Level.HIGH, urgency=Level.HIGH),
                               "테스트 신고(설정 반영)")
     db.commit()
     assert report.priority == Priority.P4  # 원래 고고 = P1

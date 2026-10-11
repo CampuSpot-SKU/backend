@@ -9,10 +9,12 @@ from typing import Annotated
 from pydantic import BaseModel, Field, StringConstraints
 
 from app.models.enums import Level, Priority
+from app.schemas.admin import NamedRef
 
 CategoryName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=50)]
 BuildingName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
 Alias = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=50)]
+RuleName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=50)]
 ActionText = Annotated[str, StringConstraints(strip_whitespace=True, max_length=500)]
 
 
@@ -94,3 +96,30 @@ class SlaListIn(BaseModel):
 class DetectionSettings(BaseModel):
     threshold_count: int = Field(ge=2, le=100)
     threshold_hours: int = Field(ge=1, le=8760)
+
+
+# ── 조건-액션 규칙 ── (1-21. 목록에서 빠진 규칙은 삭제 — 다른 데이터가 참조하지 않음. 새 신고부터 적용)
+class AutomationRuleItem(BaseModel):
+    id: uuid.UUID
+    name: str
+    category: NamedRef
+    building: NamedRef | None  # null = 모든 건물
+    resulting_priority: Priority
+    is_active: bool
+
+
+class AutomationRuleList(BaseModel):
+    items: list[AutomationRuleItem]
+
+
+class AutomationRuleIn(BaseModel):
+    id: uuid.UUID | None = None  # 없으면 새로 추가
+    name: RuleName
+    category_id: uuid.UUID
+    building_id: uuid.UUID | None = None
+    resulting_priority: Priority
+    is_active: bool = True
+
+
+class AutomationRuleListIn(BaseModel):
+    items: list[AutomationRuleIn] = Field(max_length=100)

@@ -1,7 +1,7 @@
-"""관리자 설정 관리 — 카테고리·건물·우선순위 매트릭스·SLA·탐지 임계치 (작업 1-17, 명세서 5-1).
+"""관리자 설정 관리 — 카테고리·건물·우선순위 매트릭스·SLA·탐지 임계치(작업 1-17)·조건-액션 규칙(1-21), 명세서 5-1.
 
 모두 GET(조회) / PUT(전체를 통째로 보내 저장). 응답은 저장 후 GET과 같은 모양.
-잘못된 형식은 422(FastAPI 검사), 규칙 위반(중복·없는 id·참조 중인 건물 삭제·기본 카테고리 끄기)은 409.
+잘못된 형식·없는 카테고리/건물 id(규칙)는 422, 규칙 위반(중복·없는 id·참조 중인 건물 삭제·기본 카테고리 끄기)은 409.
 새 신고는 접수 때마다 이 설정을 읽으므로 저장하면 다음 신고부터 반영 — 이미 접수된 신고는 그대로.
 """
 import logging
@@ -14,6 +14,8 @@ from sqlalchemy.orm import Session
 
 from app.deps import CurrentAdmin, DbSession
 from app.schemas.config import (
+    AutomationRuleList,
+    AutomationRuleListIn,
     BuildingList,
     BuildingListIn,
     CategoryList,
@@ -44,6 +46,9 @@ def _save(db: Session, what: str, admin_login: str, fn: Callable[[], None]) -> N
     except svc.ConfigRuleError as e:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(e)) from None
+    except svc.ConfigReferenceError as e:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(e)) from None
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=409, detail="이름이 겹치거나 다른 데이터와 맞지 않아 저장하지 못했어요.") from None
@@ -113,3 +118,17 @@ def put_detection(body: DetectionSettings, db: DbSession, admin: CurrentAdmin) -
     """탐지 임계치 저장. 탐지 배치(ai)가 다음 실행 때 이 값을 읽음."""
     _save(db, "detection", admin.login_id, lambda: svc.save_detection(db, body))
     return svc.get_detection(db)
+
+
+@router.get("/automation-rules", response_model=AutomationRuleList, responses=_ERRORS)
+def get_automation_rules(db: DbSession, _admin: CurrentAdmin) -> AutomationRuleList:
+    """조건-액션 규칙 목록(만든 순) — 카테고리(+건물)가 맞으면 매트릭스 대신 이 우선순위로 접수 (명세 3-1)."""
+    return AutomationRuleList(items=svc.list_automation_rules(db))
+
+
+@router.put("/automation-rules", response_model=AutomationRuleList, responses=_PUT_ERRORS)
+def put_automation_rules(body: AutomationRuleListIn, db: DbSession, admin: CurrentAdmin) -> AutomationRuleList:
+    """전체 목록 저장 — id 있으면 수정, 없으면 추가, 빠진 규칙은 삭제. 같은 (카테고리, 건물)·이름 중복은 409,
+    없는 category_id·building_id는 422. 새 신고부터 적용."""
+    _save(db, "automation-rules", admin.login_id, lambda: svc.save_automation_rules(db, body.items))
+    return AutomationRuleList(items=svc.list_automation_rules(db))
