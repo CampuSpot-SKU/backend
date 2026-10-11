@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     jwt_expire_minutes: int = 60
 
+    # 알림 메일 — SLA 에스컬레이션(1-13). Gmail SMTP, 비어 있으면 메일만 건너뜀(명세 6장·6-2 O-2)
+    smtp_user: str = ""
+    smtp_app_password: str = ""
+    alert_email_to: str = ""  # 받는 주소, 쉼표로 여러 개
+    # 알림 메일에 넣는 관리자 화면 주소
+    admin_page_url: str = "https://campuspot-frontend-890230516680.asia-northeast3.run.app/admin"
+
     # 기타
     cron_secret: str = ""
     sentry_dsn: str = ""

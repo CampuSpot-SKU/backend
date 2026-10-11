@@ -3,7 +3,17 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Identity, Index, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    ForeignKey,
+    Identity,
+    Index,
+    SmallInteger,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -49,6 +59,8 @@ class Report(Base):
     photo_url: Mapped[str | None] = mapped_column(Text)
     assigned_dept: Mapped[str | None] = mapped_column(String(100))
     sla_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 마지막으로 처리한 에스컬레이션 단계(0·50·100·150, 1-13) — SLA 배치가 같은 단계 알림을 두 번 보내지 않게
+    escalation_level: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="0")
     created_at: Mapped[datetime] = created_at()
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
