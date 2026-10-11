@@ -12,6 +12,7 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from app.config import get_settings
+from app.monitoring import report_ai_failure
 from app.services.pii_mask import mask_optional, mask_pii
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,7 @@ def classify_intent(text: str, history: list[HistoryItem]) -> IntentResult:
         return IntentResult.model_validate(res.json())
     except (httpx.HTTPError, ValidationError, ValueError) as e:
         logger.warning("ai intent classify 실패: %s", e)
+        report_ai_failure("intent", e)
         raise AiServiceError(str(e)) from e
 
 
@@ -138,6 +140,7 @@ def judge_report(
         return JudgeResult.model_validate(res.json())
     except (httpx.HTTPError, ValidationError, ValueError) as e:
         logger.warning("ai report judge 실패: %s", e)
+        report_ai_failure("judge", e)
         raise AiServiceError(str(e)) from e
 
 
@@ -214,6 +217,7 @@ def report_turn(
         return AgentTurn.model_validate(res.json())
     except (httpx.HTTPError, ValidationError, ValueError) as e:
         logger.warning("ai report turn 실패: %s", e)
+        report_ai_failure("agent", e)
         raise AiServiceError(str(e)) from e
 
 
@@ -246,4 +250,5 @@ def rag_answer(question: str) -> RagAnswer:
         return RagAnswer.model_validate(res.json())
     except (httpx.HTTPError, ValidationError, ValueError) as e:
         logger.warning("ai rag answer 실패: %s", e)
+        report_ai_failure("rag_answer", e)
         raise AiServiceError(str(e)) from e

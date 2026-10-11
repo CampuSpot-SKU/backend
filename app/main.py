@@ -16,6 +16,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.db.session import check_db
 from app.middleware.request_id import RequestIdMiddleware, setup_logging
+from app.monitoring import init_sentry
 from app.rate_limit import limiter, rate_limit_exceeded_handler
 from app.routers import (
     admin,
@@ -31,6 +32,7 @@ from app.routers import (
 )
 
 setup_logging()
+init_sentry()  # SENTRY_DSN이 있을 때만 (S-3·1-15)
 
 app = FastAPI(title="campuspot-backend")
 app.add_middleware(RequestIdMiddleware)
