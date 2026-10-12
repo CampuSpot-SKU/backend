@@ -7,7 +7,7 @@ import logging
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 
 from app.deps import CurrentAdmin, DbSession
@@ -29,6 +29,7 @@ from app.services.auth import (
     authenticate,
     create_access_token,
 )
+from app.services.login_guard import RETRY_AFTER_SECONDS, is_blocked, record_failure
 from app.services.photo_storage import PhotoStorage, get_photo_storage
 from app.services.report_query import get_report_detail, list_reports
 from app.services.report_workflow import InvalidTransitionError, change_status
@@ -45,12 +46,24 @@ _AUTH_ERRORS: dict[int | str, dict[str, Any]] = {401: {"description": "토큰 �
 @router.post(
     "/auth/login",
     response_model=TokenOut,
-    responses={401: {"description": "아이디 또는 비밀번호 틀림"}, 503: {"description": "JWT_SECRET 미설정"}},
+    responses={
+        401: {"description": "아이디 또는 비밀번호 틀림"},
+        429: {"description": "같은 IP·아이디로 1분 안에 5번 실패 — 잠시 후 다시 (S-3)"},
+        503: {"description": "JWT_SECRET 미설정"},
+    },
 )
-def login(body: LoginIn, db: DbSession) -> TokenOut:
+def login(body: LoginIn, request: Request, db: DbSession) -> TokenOut:
     """관리자 로그인 → JWT 발급. 이후 요청에 `Authorization: Bearer {access_token}` 헤더로 사용."""
+    if is_blocked(request, body.login_id):
+        logger.warning("관리자 로그인 실패 한도 초과 %s", body.login_id)
+        raise HTTPException(
+            status_code=429,
+            detail="로그인 실패가 너무 많아요. 1분 뒤에 다시 시도해 주세요.",
+            headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
+        )
     admin = authenticate(db, body.login_id, body.password)
     if admin is None:
+        record_failure(request, body.login_id)
         raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않아요.")
     try:
         token = create_access_token(admin.id)

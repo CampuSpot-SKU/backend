@@ -1,0 +1,45 @@
+name: Manage admins (수동 실행)
+
+# 관리자 계정 만들기·비밀번호 교체 (작업 S-3). 배포와는 무관.
+# 비밀번호는 레포가 아니라 GitHub Secret ADMIN_ACCOUNTS(JSON 목록)에만 둔다 — 형식은
+# app/services/admin_accounts.py 맨 위 설명. Actions 탭 → "Manage admins" → Run workflow.
+#   preview: 바뀔 계정만 보여줌(DB 그대로) / apply: 실제 저장
+# 결과는 Summary에 남고, 비밀번호 값은 어디에도 출력하지 않는다.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "preview = 미리보기, apply = 실제 저장"
+        type: choice
+        options: [preview, apply]
+        default: preview
+
+concurrency:
+  group: manage-admins
+  cancel-in-progress: false
+
+jobs:
+  manage:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Apply admin accounts
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ADMIN_ACCOUNTS: ${{ secrets.ADMIN_ACCOUNTS }}
+        run: |
+          set -o pipefail
+          flag=""
+          if [ "${{ inputs.mode }}" = "apply" ]; then flag="--apply"; fi
+          python scripts/manage_admins.py $flag | tee -a "$GITHUB_STEP_SUMMARY"
