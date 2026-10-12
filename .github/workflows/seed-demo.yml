@@ -1,0 +1,53 @@
+name: Seed demo data (수동 실행)
+
+# 시연용 데모 데이터 넣기·지우기 (작업 S-2). 배포와는 무관.
+# Actions 탭 → "Seed demo data" → Run workflow.
+#   mode: preview = 미리보기(DB 그대로) / apply = 데모 신고를 지우고 새로 넣기 / reset = 데모 신고만 지우기
+#   purge_test: 켜면 데모가 아닌 신고(운영 DB의 테스트 신고)를 전부 먼저 지움 — 되돌릴 수 없음.
+#               반드시 preview로 삭제 대상 접수번호를 먼저 확인할 것.
+# 결과는 Summary에 남는다. 넣은 뒤에는 탐지·예측 배치를 한 번 실행해야 후보·예측이 채워진다.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "preview = 미리보기, apply = 저장, reset = 데모 신고만 삭제"
+        type: choice
+        options: [preview, apply, reset]
+        default: preview
+      purge_test:
+        description: "데모가 아닌 신고(테스트 신고) 전부 삭제 — 되돌릴 수 없음"
+        type: boolean
+        default: false
+
+concurrency:
+  group: seed-demo-data
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Seed demo data
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MODE: ${{ inputs.mode }}
+          PURGE_TEST: ${{ inputs.purge_test }}
+        run: |
+          set -o pipefail
+          flags=""
+          if [ "$MODE" = "apply" ]; then flags="--apply"; fi
+          if [ "$MODE" = "reset" ]; then flags="--apply --reset-only"; fi
+          if [ "$PURGE_TEST" = "true" ]; then flags="$flags --purge-test"; fi
+          python scripts/seed_demo_data.py $flags | tee -a "$GITHUB_STEP_SUMMARY"
