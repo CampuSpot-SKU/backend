@@ -64,7 +64,10 @@ def test_other_account_or_ip_not_affected(client: TestClient) -> None:
     assert _login(client, "ADMIN1", "wrong").status_code == 429  # 대소문자만 바꿔 우회 불가
 
 
-def test_forwarded_for_first_value_is_used(client: TestClient) -> None:
-    for _ in range(5):
-        _login(client, "admin1", "wrong", ip="9.9.9.9, 10.0.0.1")
+def test_forwarded_for_last_value_is_used(client: TestClient) -> None:
+    """Cloud Run이 맨 끝에 붙이는 실제 IP 기준 — 맨 앞(요청자가 넣는 값)을 바꿔도 우회 안 됨."""
+    for i in range(5):
+        _login(client, "admin1", "wrong", ip=f"10.0.0.{i}, 9.9.9.9")
+    assert _login(client, "admin1", "wrong", ip="10.0.0.99, 9.9.9.9").status_code == 429
     assert _login(client, "admin1", "wrong", ip="9.9.9.9").status_code == 429
+    assert _login(client, "admin1", "wrong", ip="9.9.9.9, 8.8.8.8").status_code == 401

@@ -40,7 +40,10 @@ class Settings(BaseSettings):
     # 기타
     cron_secret: str = ""
     sentry_dsn: str = ""
-    rate_limit_per_minute: int = 20
+    rate_limit_per_minute: int = 20  # 세션당 메시지·새로고침
+    # 접속 IP당 (S-3) — slowapi 표기, 여러 개는 ";"로. 학교 와이파이 공유 IP를 고려해 넉넉히
+    session_create_limit: str = "10/minute;100/hour"
+    chat_ip_limit: str = "60/minute"
 
     @field_validator("database_url")
     @classmethod

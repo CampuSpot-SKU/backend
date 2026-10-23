@@ -31,7 +31,13 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.chat import ChatMessage, ChatSession
 from app.models.enums import ChatIntent, ChatRole
-from app.rate_limit import chat_rate_limit, limiter
+from app.rate_limit import (
+    chat_ip_shared_limit,
+    chat_rate_limit,
+    client_ip,
+    limiter,
+    session_create_limit,
+)
 from app.schemas.chat import (
     CategoryRef,
     ChatReply,
@@ -163,8 +169,17 @@ AnswererDep = Annotated[Answerer, Depends(get_answerer)]
 PhotoStorageDep = Annotated[PhotoStorage, Depends(get_photo_storage)]
 
 
-@router.post("/sessions", response_model=SessionCreated, status_code=201)
-def create_session(db: DbSession) -> SessionCreated:
+@router.post(
+    "/sessions",
+    response_model=SessionCreated,
+    status_code=201,
+    responses={429: {"description": "접속 IP당 세션 생성 한도 초과"}},
+)
+@limiter.limit(session_create_limit, key_func=client_ip)
+def create_session(
+    request: Request,  # slowapi가 요구 (IP 기준 레이트 리밋, S-3)
+    db: DbSession,
+) -> SessionCreated:
     """대화 세션 시작 — 프론트는 받은 session_id를 localStorage에 저장해 이후 요청에 사용."""
     # user_identifier: 익명 식별값 (NOT NULL 컬럼). 본인 확인은 session_id로 하므로 랜덤값이면 충분
     session = ChatSession(user_identifier=secrets.token_urlsafe(16))
@@ -187,9 +202,10 @@ def _recent_history(db: Session, session_id: uuid.UUID) -> list[ChatMessage]:
 @router.post(
     "/sessions/{session_id}/reset",
     status_code=204,
-    responses={404: {"description": "세션 없음"}, 429: {"description": "세션당 요청 한도 초과"}},
+    responses={404: {"description": "세션 없음"}, 429: {"description": "세션당·IP당 요청 한도 초과"}},
 )
 @limiter.limit(chat_rate_limit)
+@chat_ip_shared_limit
 def reset_flow(
     request: Request,  # slowapi가 요구 (레이트 리미팅 키 계산용)
     session_id: uuid.UUID,
@@ -227,11 +243,12 @@ def reset_flow(
             "content": {"text/event-stream": {}},
         },
         404: {"description": "세션 없음 — 프론트는 새 세션을 만들면 됨"},
-        429: {"description": "세션당 요청 한도 초과"},
+        429: {"description": "세션당·IP당 요청 한도 초과"},
         503: {"description": "ai 서비스 장애 — 잠시 후 다시 시도"},
     },
 )
 @limiter.limit(chat_rate_limit)
+@chat_ip_shared_limit
 def send_message(
     request: Request,  # slowapi가 요구 (레이트 리밋 키 계산용)
     session_id: uuid.UUID,

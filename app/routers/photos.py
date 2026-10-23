@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.deps import DbSession
 from app.models.chat import ChatSession
-from app.rate_limit import limiter
+from app.rate_limit import chat_ip_shared_limit, limiter
 from app.services.photo_storage import (
     MAX_BYTES,
     PhotoStorage,
@@ -59,11 +59,12 @@ def _require_session(db: Session, session_id: uuid.UUID) -> None:
         404: {"description": NO_SESSION},
         413: {"description": TOO_LARGE},
         415: {"description": UNSUPPORTED},
-        429: {"description": "세션당 요청 한도 초과"},
+        429: {"description": "세션당·IP당 요청 한도 초과"},
         503: {"description": STORAGE_FAILED},
     },
 )
 @limiter.limit(PHOTO_RATE_LIMIT)
+@chat_ip_shared_limit
 def upload_photo(
     request: Request,  # slowapi가 요구 (레이트 리밋 키 계산용)
     session_id: uuid.UUID,
@@ -91,10 +92,11 @@ def upload_photo(
 @router.delete(
     "/sessions/{session_id}/photo",
     status_code=204,
-    responses={404: {"description": NO_SESSION}, 429: {"description": "세션당 요청 한도 초과"},
+    responses={404: {"description": NO_SESSION}, 429: {"description": "세션당·IP당 요청 한도 초과"},
                503: {"description": STORAGE_FAILED}},
 )
 @limiter.limit(PHOTO_RATE_LIMIT)
+@chat_ip_shared_limit
 def delete_photo(
     request: Request,  # slowapi가 요구 (레이트 리밋 키 계산용)
     session_id: uuid.UUID,

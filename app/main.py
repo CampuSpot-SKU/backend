@@ -7,7 +7,7 @@
   app/routers/           도메인별 라우터 — 전부 /api/v1 프리픽스로 등록 (요청/응답 처리만)
   app/schemas/           요청/응답 Pydantic 모델 (/docs에 자동 반영)
   app/services/          판단·생성 로직 (슬롯필링, 신고 접수, ai 서비스 호출)
-  app/rate_limit.py      챗봇 세션당 요청 제한 (slowapi)
+  app/rate_limit.py      챗봇 세션당·IP당 요청 제한 (slowapi)
   app/middleware/        요청별 correlation ID
 """
 from fastapi import FastAPI
