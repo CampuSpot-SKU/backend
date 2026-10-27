@@ -48,6 +48,7 @@ FAKE: dict[str, IntentResult] = {
         clarifying_question="이걸 신고로 접수해드릴까요, 안내가 필요하신 건가요?",
     ),
     "신고해 주세요": IntentResult(intent="report", report_score=90, inquiry_score=10),
+    "안내가 필요해요": IntentResult(intent="inquiry", report_score=10, inquiry_score=90),
     "장애": IntentResult(intent="report", report_score=0, inquiry_score=0),
     "3동 2층 화장실 물이 계속 새요": IntentResult(intent="report", report_score=95, inquiry_score=5),
     "공학관 301호 프로젝터가 안 켜져요": IntentResult(intent="report", report_score=90, inquiry_score=10),
@@ -552,6 +553,24 @@ def test_unclear_then_report_keeps_original_sentence(client: TestClient) -> None
     assert done["report_created"] is True
     assert done["report"]["category"]["name"] == "안전"
     assert done["report"]["priority"] == "P1"  # 공용공간 × 안전위협
+
+
+def test_unclear_then_inquiry_searches_with_original_question(client: TestClient) -> None:
+    # S-4: 되묻기에 "안내가 필요해요"라고 답하면 그 말만이 아니라 원래 질문까지 합쳐서 검색해야 함
+    sid = new_session(client)
+    assert send(client, sid, "계단이 미끄러운데 어떻게 해야 하나요?").json()["intent"] == "unclear"
+    res = send(client, sid, "안내가 필요해요")
+    assert res.status_code == 200 and res.headers["content-type"].startswith("text/event-stream")
+    assert ANSWER_QUESTIONS[-1] == "계단이 미끄러운데 어떻게 해야 하나요? 안내가 필요해요"
+    assert sse_events(res)[-1]["done"] is True
+
+
+def test_plain_inquiry_is_searched_as_is(client: TestClient) -> None:
+    # 되묻기가 없었으면 이번 메시지 그대로 검색 (앞 대화가 문의여도 섞지 않음)
+    sid = new_session(client)
+    send(client, sid, "휴학 신청 어떻게 해요?")
+    send(client, sid, "안내가 필요해요")
+    assert ANSWER_QUESTIONS[-1] == "안내가 필요해요"
 
 
 def test_inquiry_returns_sse(client: TestClient) -> None:

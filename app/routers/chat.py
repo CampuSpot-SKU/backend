@@ -423,7 +423,7 @@ def send_message(
         return Unclear(clarifying_question=question)
 
     if result.intent == "inquiry":
-        return _inquiry_reply(db, session_id, user_msg, text, answerer)
+        return _inquiry_reply(db, session_id, user_msg, _inquiry_question(history, text), answerer)
 
     # 3) 신고 — 에이전트가 먼저 걸러내고(말이 안 되거나 확인이 필요하면 확인 질문부터) 필요한 것만 묻는다.
     #    바로 앞이 에이전트의 거절이었는데 학생이 다시 말하면 그 대화를 이어서 본다 (멀쩡한 신고를 막지 않음)
@@ -600,6 +600,23 @@ def _inquiry_reply(
     reply.sources = sources
     db.commit()
     return StreamingResponse(_sse_once(result.answer, sources), media_type="text/event-stream")
+
+
+def _inquiry_question(history: list[ChatMessage], text: str) -> str:
+    """검색할 질문 — 되묻기("신고로 접수해드릴까요, 안내가 필요하신 건가요?") 바로 뒤의 답이면 원래 질문과 합침.
+
+    "안내가 필요해요"만으로는 검색할 내용이 없어 항상 "근거를 찾지 못했어요"가 나왔음 (S-4 점검에서 발견).
+    신고 쪽은 에이전트가 대화 기록을 보므로 원래 문장을 이어받음 — 문의 쪽도 같게 맞춘다.
+    """
+    if (
+        len(history) >= 2
+        and history[-1].role == ChatRole.ASSISTANT
+        and history[-1].intent == ChatIntent.UNCLEAR
+        and history[-2].role == ChatRole.USER
+        and history[-2].intent == ChatIntent.UNCLEAR
+    ):
+        return f"{history[-2].content} {text}"
+    return text
 
 
 def _switch_to_inquiry(
