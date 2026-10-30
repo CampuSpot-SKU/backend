@@ -438,6 +438,7 @@ def test_thanks_after_report_is_not_a_new_report(client: TestClient) -> None:
     assert res.status_code == 200
     assert res.headers["content-type"].startswith("text/event-stream")
     assert "다행" in sse_text(res)
+    assert "sources" not in sse_events(res)[-1]  # 문의 답변이 아니므로 "공식 확인 필요" 배지 대상이 아님 (10/30)
     assert report_count() == before
     # 인사 뒤의 진짜 신고는 새로 시작
     assert send(client, sid, "물이 계속 새요").json()["intent"] == "report"
@@ -957,6 +958,17 @@ def test_emergency_words_keep_urgency_high_even_if_ai_says_low(
     done = send(client, sid, "접수").json()
     assert done["report"]["priority"] == "P1"
     assert "급하지 않아 보여요" not in done["message"]  # 모순되는 AI 이유는 버림
+
+
+def test_fallback_offer_for_dangerous_report_starts_with_119_line(client: TestClient) -> None:
+    """에이전트 장애로 대체 경로(접수 제안)에 와도 연기·화재 같은 말이면 119·112 안내가 먼저 (10/30, 4.19 민주묘지 건)."""
+    sid = new_session(client)
+    offer = send(client, sid, "혜인관 2층 화장실 콘센트에서 연기가 나요").json()
+    assert offer["follow_up_question"].startswith("지금 위험하거나 다친 분이 있으면 먼저 119나 112에 연락해 주세요.")
+    assert "접수를 도와드릴까요?" in offer["follow_up_question"]
+    # 위험한 말이 없으면 붙지 않음
+    plain = send(client, new_session(client), "3층 정수기가 고장났어요").json()
+    assert "119" not in plain["follow_up_question"]
 
 
 # ── 사진 업로드 → 접수 때 신고에 붙음 (작업 1-10) ───────────────────────────────

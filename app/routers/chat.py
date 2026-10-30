@@ -649,7 +649,11 @@ def _offer(
 ) -> ReportFollowUp:
     """"시설물 신고 접수에 관한 내용 같아요. 접수를 도와드릴까요?" — 바로 묻지 않고 먼저 의사를 확인."""
     slots = extract_slots("\n".join(texts), load_buildings(db), safety_concern)
-    content = phrase(KIND_OFFER, build_offer(" ".join(descs)), ["접수"])
+    base, must = build_offer(" ".join(descs)), ["접수"]
+    if any(ra.has_safety_words(t) for t in texts):
+        # 에이전트 장애로 이 경로에 와도 생명·안전이 걸린 말이면 119·112 안내가 먼저 (10/30, 4.19 민주묘지 건)
+        base, must = ra.SAFETY_NOTE + base, [*must, "119"]
+    content = phrase(KIND_OFFER, base, must)
     reply = _add_message(db, session_id, ChatRole.ASSISTANT, content, _after(user_msg), KIND_OFFER)
     reply.intent = ChatIntent.REPORT
     db.commit()
@@ -829,6 +833,13 @@ def _after(msg: ChatMessage) -> datetime:
 
 
 def _sse_once(text: str, sources: list[dict[str, object]] | None = None) -> Iterator[str]:
-    """답변 전체를 delta 한 번 + done 이벤트(근거 sources 포함)로 보냄 (ai 쪽 실시간 스트리밍은 3순위 1-22)."""
+    """답변 전체를 delta 한 번 + done 이벤트로 보냄 (ai 쪽 실시간 스트리밍은 3순위 1-22).
+
+    `sources`는 행정 문의 답변(근거 칩 대상)일 때만 넣는다 — 근거가 없으면 빈 목록, 인사·잡담·거절 같은
+    문의가 아닌 답변은 키 자체를 생략해서 화면이 "학교 공식 확인이 필요해요" 배지를 붙이지 않게 한다 (10/30 수정).
+    """
     yield f"data: {json.dumps({'delta': text}, ensure_ascii=False)}\n\n"
-    yield f"data: {json.dumps({'done': True, 'sources': sources or []}, ensure_ascii=False)}\n\n"
+    done: dict[str, object] = {"done": True}
+    if sources is not None:
+        done["sources"] = sources
+    yield f"data: {json.dumps(done, ensure_ascii=False)}\n\n"

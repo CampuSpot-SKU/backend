@@ -29,6 +29,14 @@ _SAFETY_RE = re.compile(
 )
 
 
+SAFETY_NOTE = "지금 위험하거나 다친 분이 있으면 먼저 119나 112에 연락해 주세요. "
+
+
+def has_safety_words(text: str) -> bool:
+    """화재·연기·가스·감전·다침 같은 생명·안전 말이 있나 (에이전트 장애 때 쓰는 대체 경로에서도 119·112 안내를 붙이는 데 씀)."""
+    return bool(_SAFETY_RE.search(text))
+
+
 def needs_agent_review(text: str) -> bool:
     """잡담·범위 밖으로 분류됐지만 신고 요청("신고해주세요")이거나 위험한 말이면 에이전트에게 넘긴다."""
     return bool(_REPORT_REQUEST_RE.search(text) or _SAFETY_RE.search(text))
