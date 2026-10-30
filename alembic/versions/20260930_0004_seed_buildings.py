@@ -1,6 +1,6 @@
 """seed — 건물 12개 (학교 캠퍼스맵 공식 목록, 생활관 제외)
 
-명세서 4-1 "위치 처리 규칙", team-docs/data/campus/buildings.json 기준.
+명세서 4-1 "위치 처리 규칙", 캠퍼스 건물 데이터(buildings.json) 기준.
 - aliases는 비워 둠. 특히 "은주관"은 은주1관·은주2관 중 어느 쪽 별칭으로도 넣지 않는다 —
   슬롯필링이 "은주1관인가요, 은주2관인가요?"라고 되묻기 때문 (app/services/slot_filling.py).
 - 이미 같은 이름이 있으면 건너뜀 (ON CONFLICT DO NOTHING) — 운영 DB에서 먼저 손으로 넣었어도 안전.

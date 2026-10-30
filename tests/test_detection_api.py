@@ -2,7 +2,7 @@
 
 TEST_DATABASE_URL(마이그레이션 끝난 테스트용 빈 DB)이 있을 때만 실행 — 운영 DB 금지!
 배치(ai)가 채울 problem_clusters·prediction_stats 행은 테스트가 직접 넣는다.
-응답 모양은 frontend 계약(team-docs briefs/1-8.md)과 같아야 함: building·category는 {id, name}.
+응답 모양은 frontend 계약(작업 1-8 지시서)과 같아야 함: building·category는 {id, name}.
 """
 import os
 import uuid

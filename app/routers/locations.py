@@ -1,6 +1,6 @@
 """위치 선택 목록 — 접수 폼의 건물 → 층 → 세부장소 선택 UI용 (작업 1-3c, 명세서 5-1).
 
-데이터는 app/data/location_options.json (team-docs/data/campus/ 에서 만든 것). 다른 학교에 적용할 땐
+데이터는 app/data/location_options.json (캠퍼스 건물 데이터에서 만든 것). 다른 학교에 적용할 땐
 이 파일과 app/data/campus.json, 건물 시드만 바꾸면 된다. 단계마다 맨 끝에
 `{"label": "목록에 없음 (직접 입력)", "custom": true}` 항목이 있음 — 고르면 학생이 직접 입력.
 """

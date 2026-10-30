@@ -1,5 +1,5 @@
 {
- "note": "캠퍼스 위치 판정용 규칙 — team-docs/data/campus/ 에서 만듦. 다른 학교 적용 시 이 파일과 location_options.json을 교체",
+ "note": "캠퍼스 위치 판정용 규칙 — 학교 건물 데이터에서 만듦. 다른 학교 적용 시 이 파일과 location_options.json을 교체",
  "buildings": [
   "대일관",
   "문예관",

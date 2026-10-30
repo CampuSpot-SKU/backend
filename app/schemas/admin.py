@@ -119,7 +119,7 @@ class StatusChangeIn(BaseModel):
     memo: str | None = Field(default=None, max_length=1000, examples=["시설팀 배정, 오후 방문 예정"])
 
 
-# ── 탐지·예측 (작업 1-8 — 명세서 3-3, 5-1 "관리자용 — 탐지·예측", 화면 계약 team-docs briefs/1-8.md) ──
+# ── 탐지·예측 (작업 1-8 — 명세서 3-3, 5-1 "관리자용 — 탐지·예측", 화면 계약 작업 1-8 지시서) ──
 
 
 class ProblemClusterItem(BaseModel):

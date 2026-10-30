@@ -1,7 +1,7 @@
 """관리자 설정 API 요청/응답 형식 — 명세서 5-1 "관리자용 — 설정 관리" (작업 1-17).
 
 모든 PUT은 "전체를 통째로 보내 저장" — 응답은 저장 후 GET과 같은 모양.
-형식 결정은 team-docs status.md 4장 (10/4 규민 제안).
+형식 결정은 작업 현황판 4장 (10/4 규민 제안).
 """
 import uuid
 from typing import Annotated

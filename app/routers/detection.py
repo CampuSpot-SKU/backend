@@ -2,7 +2,7 @@
 
 데이터는 탐지·예측 배치(ai 서비스)가 problem_clusters·prediction_stats에 채운다. 이 라우터는
 읽기와 승격/기각만. 인증은 다른 관리자 API와 같음(Authorization: Bearer, CurrentAdmin).
-응답 모양은 frontend 화면 계약(team-docs briefs/1-8.md)과 같다.
+응답 모양은 frontend 화면 계약(작업 1-8 지시서)과 같다.
 """
 import logging
 import uuid
