@@ -78,7 +78,7 @@ def test_signup_then_login_then_me(client: TestClient) -> None:
     assert saved is not None and saved.password_hash != PASSWORD and saved.password_hash.startswith("$2")
 
     res = client.post("/api/v1/auth/login", json={"login_id": login_id.upper(), "password": PASSWORD})
-    assert res.status_code == 200 and res.json()["name"] == "김학생"
+    assert res.status_code == 200 and res.json()["name"] == "김학생" and res.json()["role"] == "user"
     headers = {"Authorization": f"Bearer {res.json()['access_token']}"}
     me = client.get("/api/v1/auth/me", headers=headers)
     assert me.status_code == 200 and me.json() == {"login_id": login_id, "name": "김학생"}
@@ -115,8 +115,8 @@ def test_login_failures_are_limited(client: TestClient) -> None:
 
 
 @needs_db
-def test_admin_account_cannot_be_used_or_taken_by_student_login(client: TestClient) -> None:
-    """관리자 계정은 학생 로그인으로 안 되고, 관리자 아이디로 학생 가입도 안 됨 (1-24 추가)."""
+def test_admin_account_logs_in_as_admin_and_cannot_be_taken_by_student(client: TestClient) -> None:
+    """같은 로그인 창에서 관리자 계정이면 관리자 토큰(role=admin), 관리자 아이디로 학생 가입은 안 됨 (1-24, 10/30)."""
     import bcrypt
 
     login_guard.reset_all()
@@ -127,8 +127,15 @@ def test_admin_account_cannot_be_used_or_taken_by_student_login(client: TestClie
     db.close()
     # 관리자 로그인은 됨
     assert client.post("/api/v1/admin/auth/login", json={"login_id": admin_id, "password": PASSWORD}).status_code == 200
-    # 같은 아이디·비밀번호로 학생 로그인은 안 됨 (users에 없음)
-    assert client.post("/api/v1/auth/login", json={"login_id": admin_id, "password": PASSWORD}).status_code == 401
+    # 같은 로그인 창(/auth/login)으로 관리자 계정 → role=admin, 관리자 API에 쓸 수 있는 토큰
+    res = client.post("/api/v1/auth/login", json={"login_id": admin_id, "password": PASSWORD})
+    assert res.status_code == 200 and res.json()["role"] == "admin" and res.json()["name"] == "테스트관리자"
+    admin_headers = {"Authorization": f"Bearer {res.json()['access_token']}"}
+    assert client.get("/api/v1/admin/reports", headers=admin_headers).status_code == 200
+    assert client.get("/api/v1/auth/me", headers=admin_headers).status_code == 401  # 학생 API엔 못 씀
+    # 비밀번호가 틀리면 학생과 같은 401 문구
+    wrong = client.post("/api/v1/auth/login", json={"login_id": admin_id, "password": "wrong-password"})
+    assert wrong.status_code == 401 and wrong.json()["detail"] == "아이디 또는 비밀번호가 맞지 않아요."
     # 관리자 아이디로 학생 가입 불가 (일반 중복과 같은 문구)
     res = client.post("/api/v1/auth/signup", json={"login_id": admin_id, "password": PASSWORD, "name": "흉내"})
     assert res.status_code == 409 and res.json()["detail"] == "이미 쓰는 아이디예요."
