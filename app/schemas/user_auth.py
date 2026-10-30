@@ -54,6 +54,8 @@ class UserTokenOut(BaseModel):
     access_token: str
     token_type: Literal["bearer"] = "bearer"
     name: str
+    # 로그인한 계정 종류 — "admin"이면 관리자 토큰이라 화면이 관리자 페이지로 넘긴다 (10/30)
+    role: Literal["user", "admin"] = "user"
 
 
 class UserMe(BaseModel):
