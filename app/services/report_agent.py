@@ -147,11 +147,13 @@ def report_tail(history: Sequence[object]) -> Tail:
                 action = str(p.get("action") or "")
                 tail.prev_action = action or None
                 tail.prev_clarify = bool(p.get("clarify"))
-                if action == "ask":
-                    tail.asked += 1
                 raw = p.get("state")
                 if isinstance(raw, dict):
                     tail.state = AgentState.model_validate(raw)
+                # 사진·글 중 어느 쪽인지 묻는 질문(1-26)은 정보를 더 묻는 게 아니라 횟수에서 뺀다 —
+                # 세면 위치 질문 1번 뒤 바로 한도가 차서 "아까 사진 봤어?"에 답하지 못하고 확인으로 넘어감 (배포 확인 10/30)
+                if action == "ask" and not (tail.state is not None and isinstance(raw, dict) and tail.state.photo_conflict):
+                    tail.asked += 1
             else:
                 tail.prev_action = None
                 tail.prev_clarify = False

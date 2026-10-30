@@ -153,3 +153,22 @@ def test_unknown_professor_name_gets_hint_with_similar_names() -> None:
     assert cp.missing_name_hints("장문수 교수실 불이 안 켜져") == []
     assert "김지상" in cp.missing_name_hints("김지산 교수실")[0]
     assert cp.missing_name_hints("담당 교수님 방 불이 안 켜져요") == []
+
+
+def test_photo_conflict_question_is_not_counted_and_photo_mark_is_kept_out_of_texts() -> None:
+    """1-26: 사진·글 중 어느 쪽인지 묻는 질문은 질문 횟수에서 빼고, 사진 표지는 신고 내용(user_texts)에 넣지 않는다."""
+    conflict = AgentState(problem="정수기가 고장났어요", photo_note="벽이 크게 부서져 있어요", photo_conflict=True).model_dump()
+    wall = AgentState(problem="벽이 크게 부서져 있어요", problem_clear=True, photo_note="벽이 크게 부서져 있어요").model_dump()
+    history = [
+        _msg(ChatRole.USER, "정수기가 고장났어 (사진 첨부)"),
+        _msg(ChatRole.ASSISTANT, "어느 쪽을 신고하실 건가요?", {"kind": "agent", "action": "ask", "state": conflict}),
+        _msg(ChatRole.USER, "사진 속 문제예요"),
+        _msg(ChatRole.ASSISTANT, "어느 건물 몇 층인가요?", {"kind": "agent", "action": "ask", "state": wall}),
+    ]
+    tail = ra.report_tail(history)
+    assert tail.asked == 1  # 위치 질문만 셈 → "아까 사진 봤어?"에 답할 여유가 남음
+    assert tail.user_texts == ["정수기가 고장났어", "사진 속 문제예요"]
+    assert tail.conversation[0].content == "정수기가 고장났어 (사진 첨부)"  # 에이전트는 표지를 봄
+    assert tail.state is not None and tail.state.photo_note == "벽이 크게 부서져 있어요"
+    assert ra.without_photo_mark("물이 새요 (사진 첨부)") == "물이 새요" and ra.with_photo_mark("물이 새요") == "물이 새요 (사진 첨부)"
+    assert ra.with_photo_mark(ra.PHOTO_ONLY_TEXT) == ra.PHOTO_ONLY_TEXT
