@@ -53,6 +53,16 @@ def run_case(case: Case) -> dict[str, Any]:
     names: list[str] = list(campus_rules()["buildings"])
     tail = ra.Tail(conversation=[], state=None, prev_action=None, asked=0, student_turns=0, user_texts=[])
     transcript: list[str] = []
+    # 앞 턴을 미리 깔아 두는 케이스 (1-26 사진 기억 — 사진 턴은 이미지가 필요해 대화·state로 대신 재현)
+    for user, bot in case.get("prior", []):
+        tail.conversation += [HistoryItem(role="user", content=user), HistoryItem(role="assistant", content=bot)]
+        tail.user_texts.append(ra.without_photo_mark(user))
+        tail.student_turns += 1
+        transcript += [f"(앞 턴) 학생: {user}", f"(앞 턴) 챗봇: {bot}"]
+    if case.get("state"):
+        tail.state = AgentState(**case["state"])
+        tail.prev_action = case.get("prev_action", "ask")
+        tail.asked = case.get("asked", 0)
     result: ra.Decision | None = None
     error = ""
     for text in case["turns"]:
