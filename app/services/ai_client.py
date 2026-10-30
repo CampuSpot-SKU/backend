@@ -144,6 +144,7 @@ def judge_report(
         raise AiServiceError(str(e)) from e
 
 
+AGENT_PHOTO_TIMEOUT_SECONDS = 40.0  # 사진이 붙은 턴 — 이미지 전송·분석 + 재시도 1회
 AGENT_TIMEOUT_SECONDS = 25.0  # 신고 대화 에이전트 — Gemini 호출 + 재시도 1회. 실패하면 규칙 기반 흐름으로 대체
 
 
@@ -198,6 +199,7 @@ def report_turn(
     buildings: list[dict[str, str]],
     candidates: list[dict[str, str]],
     hints: list[str] | None = None,
+    photo: PhotoData | None = None,
 ) -> AgentTurn:
     """신고 접수 대화 한 턴을 에이전트가 처리. 실패하면 AiServiceError (호출한 쪽이 규칙 기반 흐름으로 대체)."""
     url = _endpoint("/report/turn")
@@ -210,9 +212,13 @@ def report_turn(
         "candidates": candidates,
         "hints": [mask_pii(h) for h in hints or []],
     }
+    if photo is not None:  # 사진 턴(10/30) — judge_report와 같은 방식으로 base64 전송
+        payload["photo_base64"] = base64.b64encode(photo[0]).decode("ascii")
+        payload["photo_mime"] = photo[1]
+    timeout = AGENT_PHOTO_TIMEOUT_SECONDS if photo is not None else AGENT_TIMEOUT_SECONDS
     headers = {"X-Internal-Secret": get_settings().ai_service_secret}
     try:
-        res = httpx.post(url, json=payload, headers=headers, timeout=AGENT_TIMEOUT_SECONDS)
+        res = httpx.post(url, json=payload, headers=headers, timeout=timeout)
         res.raise_for_status()
         return AgentTurn.model_validate(res.json())
     except (httpx.HTTPError, ValidationError, ValueError) as e:

@@ -48,10 +48,14 @@ MAX_QUESTIONS = 2
 MAX_STUDENT_TURNS = 10
 CONFIRM_CHOICES = ["네, 접수해 주세요", "내용을 고칠래요", "취소할게요"]
 GIVE_UP = "신고 내용을 정확히 알기 어려워서 접수는 하지 않을게요. 어떤 시설에 무슨 문제가 있는지 알려주시면 다시 도와드릴게요."
-Agent = Callable[
-    [list[HistoryItem], AgentState | None, str | None, int, list[dict[str, str]], list[dict[str, str]], list[str]],
-    AgentTurn,
-]
+PHOTO_ONLY_TEXT = "(사진을 보냈어요)"  # 학생이 글 없이 사진만 보냈을 때 content로 저장되는 자리표시 — 신고 내용이 아님
+# 7개 위치 인자(conversation, state, prev_action, questions_left, buildings, candidates, hints) + 사진 턴에만 photo=(bytes, mime) 키워드
+Agent = Callable[..., AgentTurn]
+
+
+def _real_texts(texts: Sequence[str]) -> list[str]:
+    """자리표시를 뺀 학생 말 — 건물 찾기·접수 내용(description)에 쓴다."""
+    return [t for t in texts if t != PHOTO_ONLY_TEXT]
 
 
 @dataclass
@@ -95,7 +99,8 @@ def report_tail(history: Sequence[object]) -> Tail:
         content = str(getattr(msg, "content", ""))
         if role == ChatRole.USER:
             tail.conversation.append(HistoryItem(role="user", content=content))
-            tail.user_texts.append(content)
+            if content != PHOTO_ONLY_TEXT:
+                tail.user_texts.append(content)
             tail.student_turns += 1
         else:
             tail.conversation.append(HistoryItem(role="assistant", content=content))
@@ -180,13 +185,16 @@ def _fill_landmark_near(state: AgentState, texts: Sequence[str], building_names:
     return state
 
 
-def decide(tail: Tail, user_text: str, building_names: Sequence[str], agent: Agent) -> Decision:
+def decide(
+    tail: Tail, user_text: str, building_names: Sequence[str], agent: Agent, photo: tuple[bytes, str] | None = None
+) -> Decision:
     """학생의 이번 말까지 반영해 다음 행동을 정한다. AiServiceError는 호출한 쪽에서 처리 (규칙 기반으로 대체)."""
-    texts = [*tail.user_texts, user_text]
+    texts = _real_texts([*tail.user_texts, user_text])
     conversation = [*tail.conversation, HistoryItem(role="user", content=user_text)]
     buildings, candidates, hints = grounding(texts, building_names)
     questions_left = max(0, MAX_QUESTIONS - tail.asked)
-    out = agent(conversation, tail.state, tail.prev_action, questions_left, buildings, candidates, hints)
+    args = (conversation, tail.state, tail.prev_action, questions_left, buildings, candidates, hints)
+    out = agent(*args, photo=photo) if photo is not None else agent(*args)
     state, action, message, choices = out.state, out.action, out.message, list(out.choices)
     state = _fill_landmark_near(state, texts, building_names)
 

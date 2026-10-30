@@ -131,6 +131,7 @@ Answerer = Callable[[str], RagAnswer]
 Judge = Callable[[ReportSlots, str], ReportSlots]  # 규칙으로 뽑은 슬롯 → AI 판정을 반영한 슬롯
 # 접수된 신고 id → 대기 사진을 옮긴 저장소 경로(사진 없음·저장소 실패면 None) — 작업 1-10
 AttachPhoto = Callable[[uuid.UUID], str | None]
+PHOTO_FAILED = "사진을 분석하지 못했어요. 어떤 문제가 있는지 글로 알려주시겠어요?"  # 사진만 보냈는데 AI가 못 본 경우 (10/30)
 PHOTO_SENT = " 사진도 함께 전달했어요."  # 사진이 붙은 접수만 완료 문구 끝에 붙임 (명세 5-1)
 
 
@@ -321,8 +322,26 @@ def send_message(
     if action == "switch_to_inquiry" or (draft.in_progress and wants_inquiry(text)):
         return _switch_to_inquiry(db, session_id, user_msg, draft, answerer)
 
+    # 사진이 함께 온 턴(10/30): 에이전트가 사진을 직접 보고 답함. 사진만 보낸 경우(자리표시 문구)는 의도분류를 건너뜀
+    in_agent_flow = draft.in_progress and draft.last_kind == ra.AGENT_KIND
+    turn_photo = judge_photo() if (body.with_photo and action is None) else None
+    if text == ra.PHOTO_ONLY_TEXT and action is None:
+        if turn_photo is None or (draft.in_progress and not in_agent_flow):
+            return _photo_failed(db, session_id, user_msg, keep_flow=in_agent_flow)
+        if not in_agent_flow:
+            user_msg.intent = ChatIntent.REPORT
+            try:
+                return _agent_reply(
+                    db, session_id, user_msg, _first_tail(history, draft), text, agent, judge, attach,
+                    first=True, safety_concern=draft.safety_concern, photo=turn_photo,
+                )
+            except AiServiceError as e:
+                logger.warning("사진 분석 실패: %s", e)
+                user_msg.debug_payload = {"agent_error": str(e)[:300]}
+                return _photo_failed(db, session_id, user_msg, keep_flow=False)
+
     # 1-0) 에이전트가 진행하던 신고 대화 → 에이전트가 이어서 처리 (실패하면 아래 규칙 기반 흐름으로 대체)
-    if draft.in_progress and draft.last_kind == ra.AGENT_KIND:
+    if in_agent_flow:
         user_msg.intent = ChatIntent.REPORT
         if action == "cancel_report" or (action is None and is_cancel(text)):
             return _cancel(db, session_id, user_msg)
@@ -334,10 +353,14 @@ def send_message(
                 db, session_id, user_msg, tail.state, tail.user_texts, judge, attach
             )
         try:
-            return _agent_reply(db, session_id, user_msg, tail, agent_text, agent, judge, attach)
+            return _agent_reply(
+                db, session_id, user_msg, tail, agent_text, agent, judge, attach, photo=turn_photo
+            )
         except AiServiceError as e:
             logger.warning("신고 에이전트 실패 → 규칙 기반 흐름으로 대체: %s", e)
             user_msg.debug_payload = {"agent_error": str(e)[:300]}
+            if text == ra.PHOTO_ONLY_TEXT:  # 사진만 보낸 턴은 규칙 기반 흐름이 이해하지 못함
+                return _photo_failed(db, session_id, user_msg, keep_flow=True)
 
     # 1) 신고 흐름 중(되묻기·요약 확인에 대한 답변) → 의도분류 생략하고 슬롯필링 계속
     if draft.in_progress or action in ("confirm_report", "cancel_report"):
@@ -432,7 +455,7 @@ def send_message(
     try:
         return _agent_reply(
             db, session_id, user_msg, tail, text, agent, judge, attach,
-            first=True, safety_concern=draft.safety_concern or result.safety_concern,
+            first=True, safety_concern=draft.safety_concern or result.safety_concern, photo=turn_photo,
         )
     except AiServiceError as e:
         logger.warning("신고 에이전트 실패 → 규칙 기반 흐름으로 대체: %s", e)
@@ -496,12 +519,13 @@ def _agent_reply(
     *,
     first: bool = False,
     safety_concern: bool = False,
+    photo: PhotoData | None = None,
 ) -> ChatReply | StreamingResponse:
     """에이전트에게 이번 턴을 맡기고 정책을 적용한 결과를 응답으로 만든다. AiServiceError는 호출한 쪽이 처리."""
     buildings = load_buildings(db)
-    decision = ra.decide(tail, text, [b.name for b in buildings], agent)
+    decision = ra.decide(tail, text, [b.name for b in buildings], agent, photo=photo)
     state = decision.state
-    texts = [*tail.user_texts, text]
+    texts = [t for t in (*tail.user_texts, text) if t != ra.PHOTO_ONLY_TEXT]
     payload: dict[str, object] = {
         "kind": ra.AGENT_KIND, "action": decision.action, "state": state.model_dump(), "clarify": decision.clarify,
     }
@@ -536,6 +560,17 @@ def _agent_reply(
     return ReportFollowUp(
         follow_up_question=decision.message, slots_filled=filled, choices=decision.choices or None
     )
+
+
+def _photo_failed(
+    db: Session, session_id: uuid.UUID, user_msg: ChatMessage, *, keep_flow: bool
+) -> StreamingResponse:
+    """사진만 보냈는데 AI가 사진을 보지 못함 — 글로 설명을 부탁한다. 진행 중이던 신고 대화는 그대로 이어감."""
+    user_msg.intent = ChatIntent.REPORT if keep_flow else None
+    reply = _add_message(db, session_id, ChatRole.ASSISTANT, PHOTO_FAILED, _after(user_msg))
+    reply.intent = ChatIntent.REPORT if keep_flow else None
+    db.commit()
+    return StreamingResponse(_sse_once(PHOTO_FAILED), media_type="text/event-stream")
 
 
 def _cancel(

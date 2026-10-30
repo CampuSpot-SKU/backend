@@ -26,8 +26,10 @@ from app.db.session import get_engine, get_sessionmaker
 from app.main import app
 from app.models import Building, ChatMessage, Report, ReportStatusHistory
 from app.models.enums import ReportStatus
-from app.routers.chat import get_answerer, get_intent_classifier, get_judger, get_phraser
+from app.routers.chat import get_agent, get_answerer, get_intent_classifier, get_judger, get_phraser
 from app.services.ai_client import (
+    AgentState,
+    AgentTurn,
     AiServiceError,
     HistoryItem,
     IntentResult,
@@ -1154,3 +1156,73 @@ def test_switch_to_inquiry_answers_the_first_report_sentence(client: TestClient)
     res = send(client, sid, "안내만 받을래요", action="switch_to_inquiry")
     assert sse_events(res)[-1]["sources"]
     assert ANSWER_QUESTIONS == ["물이 계속 새요"]
+
+
+# ── 사진이 함께 온 턴: 에이전트가 사진을 보고 답함 (10/30) ───────────────────────────
+PHOTO_ONLY = "(사진을 보냈어요)"
+PHOTO_FAILED = "사진을 분석하지 못했어요. 어떤 문제가 있는지 글로 알려주시겠어요?"
+
+
+def send_with_photo(client: TestClient, sid: str, content: str = PHOTO_ONLY):  # type: ignore[no-untyped-def]
+    return client.post(
+        f"/api/v1/chat/sessions/{sid}/messages", json={"content": content, "with_photo": True}
+    )
+
+
+@pytest.fixture()
+def photo_agent() -> Iterator[list[dict[str, Any]]]:
+    """가짜 에이전트 — 받은 인자를 calls에 기록하고, 사진이 오면 '변기가 막힌 것 같네요…'로 위치를 묻는다."""
+    calls: list[dict[str, Any]] = []
+
+    def agent(conversation, state, prev_action, questions_left, buildings, candidates, hints, photo=None):  # type: ignore[no-untyped-def]
+        calls.append({"conversation": conversation, "photo": photo, "state": state})
+        if photo is not None and photo[1] == "image/png":  # 관련 없는 사진 취급
+            return AgentTurn(action="ask", message="어떤 사진인지 잘 모르겠어요. 어떤 문제가 있는지 말씀해 주시겠어요?",
+                             choices=[], state=AgentState())
+        if photo is not None:
+            return AgentTurn(
+                action="ask", message="변기가 막힌 것 같네요. 어느 건물 몇 층 남자 화장실인지 알 수 있을까요?",
+                choices=[], state=AgentState(problem="변기가 막힌 것 같아요", symptom="막혀 있어요", problem_clear=True),
+            )
+        return AgentTurn(
+            action="confirm", message="혜인관 2층 화장실 변기가 막혔다고 접수할까요?", choices=[],
+            state=AgentState(problem="변기가 막힌 것 같아요", problem_clear=True, building="혜인관", floor="2"),
+        )
+
+    app.dependency_overrides[get_agent] = lambda: agent
+    try:
+        yield calls
+    finally:
+        app.dependency_overrides.pop(get_agent, None)
+
+
+def test_photo_only_message_goes_to_agent_with_photo(client: TestClient, photo_agent: list[dict[str, Any]]) -> None:
+    sid = new_session(client)
+    assert upload(client, sid).status_code == 201
+    body = send_with_photo(client, sid).json()
+    assert body["intent"] == "report" and body["follow_up_question"].startswith("변기가 막힌 것 같네요.")
+    assert photo_agent[0]["photo"] == (JPEG, "image/jpeg")
+    # 글 없이 보낸 사진이 신고 내용·건물 찾기에 자리표시 문구로 섞이지 않는다
+    assert body["slots_filled"]["description"] == "변기가 막힌 것 같아요"
+    # 위치를 글로 답하면 같은 대화로 이어지고(사진은 다시 보내지 않음) 확인 단계로 간다
+    nxt = send(client, sid, "혜인관 2층이요").json()
+    assert nxt["confirm_required"] is True and photo_agent[1]["photo"] is None
+
+
+def test_photo_only_irrelevant_photo_asks_what_it_is(client: TestClient, photo_agent: list[dict[str, Any]]) -> None:
+    sid = new_session(client)
+    assert upload(client, sid, PNG).status_code == 201
+    body = send_with_photo(client, sid).json()
+    assert "잘 모르겠어요" in body["follow_up_question"] and body["slots_filled"]["description"] is None
+
+
+def test_photo_only_without_uploaded_photo_or_agent_asks_for_text(client: TestClient) -> None:
+    # 올린 사진이 없는데 사진만 보냄 → 안내 한 줄 (배지 없는 SSE)
+    res = send_with_photo(client, new_session(client))
+    assert sse_text(res) == PHOTO_FAILED and "sources" not in sse_events(res)[-1]
+    # 사진은 있는데 에이전트가 장애 → 같은 안내 (대체 흐름이 자리표시 문구를 신고 내용으로 받지 않음)
+    sid = new_session(client)
+    assert upload(client, sid).status_code == 201
+    res = send_with_photo(client, sid)
+    assert sse_text(res) == PHOTO_FAILED
+    assert PHOTO_ONLY not in [m.content for m in saved_messages(sid) if m.role.value == "assistant"]

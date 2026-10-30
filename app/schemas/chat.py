@@ -32,6 +32,8 @@ class MessageIn(BaseModel):
     # 버튼([안내만 받을래요]/[접수]/[취소])을 눌렀을 때만 — 이때 content는 버튼 글자
     action: ChatAction | None = None
     draft: DraftIn | None = None
+    # 이 메시지와 함께 방금 올린 사진이 있음 (사진만 보내면 content는 "(사진을 보냈어요)") — 에이전트가 사진을 직접 보고 답함
+    with_photo: bool = False
 
 
 class SlotsFilled(BaseModel):
