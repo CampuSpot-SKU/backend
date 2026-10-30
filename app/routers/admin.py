@@ -17,6 +17,7 @@ from app.schemas.admin import (
     AdminReportDetail,
     AdminReportList,
     LoginIn,
+    ReportConversation,
     SimilarReportList,
     SlaStatus,
     SortKey,
@@ -29,6 +30,7 @@ from app.services.auth import (
     authenticate,
     create_access_token,
 )
+from app.services.conversation_query import get_report_conversation
 from app.services.login_guard import RETRY_AFTER_SECONDS, is_blocked, record_failure
 from app.services.photo_storage import PhotoStorage, get_photo_storage
 from app.services.report_query import get_report_detail, list_reports
@@ -144,6 +146,22 @@ def patch_report_status(
     assert detail is not None
     # 화면은 이 응답으로 상세를 갈아끼우므로 사진도 상세 조회와 똑같이 임시 링크로
     return _with_photo_link(detail, photos)
+
+
+@router.get(
+    "/reports/{report_id}/conversation",
+    response_model=ReportConversation,
+    responses={**_AUTH_ERRORS, 404: {"description": "신고 없음"}},
+)
+def report_conversation(
+    report_id: uuid.UUID, db: DbSession, _admin: CurrentAdmin
+) -> ReportConversation:
+    """신고 대화 열람 — 신고가 접수되기까지 학생·챗봇이 나눈 대화 (1-25, 명세 4-2·5-1). 조회 전용.
+    session_id 등 식별값은 내보내지 않고 글·시각만 돌려준다(익명 원칙)."""
+    result = get_report_conversation(db, report_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="신고를 찾을 수 없어요.")
+    return result
 
 
 @router.get(

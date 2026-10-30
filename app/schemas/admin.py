@@ -9,7 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.models.enums import ClusterStatus, Priority, ReportStatus
+from app.models.enums import ChatRole, ClusterStatus, Priority, ReportStatus
 
 # SLA 상태: 처리 중인 건만 계산 (해결·종료는 null)
 #   초과 = 마감 지남 / 임박 = SLA 시간 절반 이상 경과(명세 3-1 "50% 경과 → 리마인드"와 같은 기준) / 온타임 = 그 외
@@ -95,6 +95,23 @@ class SimilarReport(BaseModel):
 class SimilarReportList(BaseModel):
     embedding_ready: bool  # false = 이 신고의 임베딩이 아직 없음(접수 다음 날 탐지 배치가 채움) → items 빈 목록
     items: list[SimilarReport]  # 가까운 순, 최대 limit건
+
+
+class ConversationMessage(BaseModel):
+    """신고 대화의 한 줄 — 글과 시각만 (session_id·intent_scores·debug_payload는 내보내지 않음, 익명 원칙)."""
+
+    role: ChatRole  # user = 학생, assistant = 챗봇
+    content: str
+    created_at: datetime
+
+
+class ReportConversation(BaseModel):
+    """상세보기 신고 대화 열람 (1-25) — 신고가 접수되기까지의 대화, 오래된 순. 대화가 없으면 messages=[]."""
+
+    report_id: uuid.UUID
+    display_no: int
+    messages: list[ConversationMessage]
+    truncated: bool  # true = 80개를 넘어 최근 쪽만 남김
 
 
 class StatusChangeIn(BaseModel):
