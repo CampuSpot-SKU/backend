@@ -4,6 +4,7 @@
 화면 머리글의 "환영합니다 OOO님!" 표시에만 쓴다.
 - 비밀번호는 bcrypt 해시로만 저장. 로그인은 저장된 해시와 대조해 맞을 때만 토큰을 준다.
 - 토큰은 관리자와 같은 JWT_SECRET이지만 `typ: "user"`라 관리자 API에는 쓸 수 없다(app/services/auth.py).
+- 관리자 계정(admins 테이블)은 여기서 로그인할 수 없고(users만 조회), 관리자 아이디로 학생 가입도 막는다.
 - 남용 막기: 회원가입은 접속 IP당 5회/분, 로그인 실패는 (IP, 아이디)당 5회/분(관리자와 같은 규칙, S-3).
 """
 import logging
@@ -13,11 +14,12 @@ from typing import Annotated
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.models.admin import Admin
 from app.models.user import User
 from app.rate_limit import client_ip, limiter
 from app.schemas.user_auth import SignupIn, UserLoginIn, UserMe, UserTokenOut
@@ -64,7 +66,11 @@ def _token_for(user: User) -> UserTokenOut:
 @limiter.limit(SIGNUP_LIMIT, key_func=client_ip)
 def signup(request: Request, body: SignupIn, db: DbSession) -> UserTokenOut:
     """회원가입 → 바로 로그인된 토큰을 준다."""
-    if db.scalar(select(User.id).where(User.login_id == body.login_id)) is not None:
+    taken = db.scalar(select(User.id).where(User.login_id == body.login_id)) is not None
+    # 관리자 아이디(admins 테이블)로는 학생 가입 불가 — 같은 아이디로 학생 계정이 생겨 관리자 계정과 헷갈리지 않게.
+    # 아이디가 관리자 것인지는 알리지 않고 일반 중복과 같은 문구로 거절 (관리자 아이디 노출 방지)
+    taken = taken or db.scalar(select(Admin.id).where(func.lower(Admin.login_id) == body.login_id)) is not None
+    if taken:
         raise HTTPException(status_code=409, detail="이미 쓰는 아이디예요.")
     user = User(login_id=body.login_id, password_hash=hash_password(body.password), name=body.name)
     db.add(user)

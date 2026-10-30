@@ -54,4 +54,6 @@ def test_sse_done_event_carries_sources() -> None:
     chunks = list(_sse_once("답", [{"title": "t", "article_no": None, "url": None}]))
     assert json.loads(chunks[0][6:]) == {"delta": "답"}
     assert json.loads(chunks[1][6:]) == {"done": True, "sources": [{"title": "t", "article_no": None, "url": None}]}
-    assert json.loads(list(_sse_once("인사"))[1][6:]) == {"done": True, "sources": []}
+    # 인사·잡담처럼 문의가 아닌 답변은 sources 키를 생략 (10/30 chat.py 변경 — 화면이 "학교 공식 확인" 배지를 붙이지 않게)
+    assert json.loads(list(_sse_once("인사"))[1][6:]) == {"done": True}
+    assert json.loads(list(_sse_once("답", []))[1][6:]) == {"done": True, "sources": []}  # 근거 없는 문의 답변은 빈 목록

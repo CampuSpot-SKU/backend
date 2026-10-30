@@ -21,7 +21,7 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.db.session import get_engine, get_sessionmaker
 from app.main import app
-from app.models import User
+from app.models import Admin, User
 from app.schemas.user_auth import SignupIn
 from app.services import auth, login_guard
 
@@ -111,4 +111,25 @@ def test_login_failures_are_limited(client: TestClient) -> None:
         assert client.post("/api/v1/auth/login", json={"login_id": login_id, "password": "wrong-password"}).status_code == 401
     blocked = client.post("/api/v1/auth/login", json={"login_id": login_id, "password": PASSWORD})
     assert blocked.status_code == 429 and blocked.headers["Retry-After"] == "60"
+    login_guard.reset_all()
+
+
+@needs_db
+def test_admin_account_cannot_be_used_or_taken_by_student_login(client: TestClient) -> None:
+    """관리자 계정은 학생 로그인으로 안 되고, 관리자 아이디로 학생 가입도 안 됨 (1-24 추가)."""
+    import bcrypt
+
+    login_guard.reset_all()
+    admin_id = _new_id()
+    db = get_sessionmaker()()
+    db.add(Admin(login_id=admin_id, password_hash=bcrypt.hashpw(PASSWORD.encode(), bcrypt.gensalt(4)).decode(), name="테스트관리자"))
+    db.commit()
+    db.close()
+    # 관리자 로그인은 됨
+    assert client.post("/api/v1/admin/auth/login", json={"login_id": admin_id, "password": PASSWORD}).status_code == 200
+    # 같은 아이디·비밀번호로 학생 로그인은 안 됨 (users에 없음)
+    assert client.post("/api/v1/auth/login", json={"login_id": admin_id, "password": PASSWORD}).status_code == 401
+    # 관리자 아이디로 학생 가입 불가 (일반 중복과 같은 문구)
+    res = client.post("/api/v1/auth/signup", json={"login_id": admin_id, "password": PASSWORD, "name": "흉내"})
+    assert res.status_code == 409 and res.json()["detail"] == "이미 쓰는 아이디예요."
     login_guard.reset_all()
