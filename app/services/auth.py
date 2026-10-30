@@ -2,7 +2,9 @@
 
 - 비밀키: 환경변수 JWT_SECRET (GitHub Secret → deploy.yml로 주입). 비어 있으면 토큰을 만들지도
   검사하지도 않고 503을 돌려줌 → 비밀키 없이 서명된 토큰이 돌아다니는 사고 방지.
-- 만료: JWT_EXPIRE_MINUTES (기본 60분). 회원가입·토큰 갱신은 없음 (시드 계정 admin1~5만 사용).
+- 만료: JWT_EXPIRE_MINUTES (기본 60분). 관리자는 회원가입·토큰 갱신 없음 (Secret으로 만든 계정만 사용).
+- 학생 계정 토큰(1-24, `app/routers/user_auth.py`)도 같은 비밀키로 만들지만 `typ: "user"`가 들어 있어
+  관리자 API에서는 거절되고, 반대로 관리자 토큰(`typ` 없음)은 학생 API에서 거절된다.
 """
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -53,17 +55,24 @@ def authenticate(db: Session, login_id: str, password: str) -> Admin | None:
     return admin
 
 
-def create_access_token(admin_id: uuid.UUID, now: datetime | None = None) -> str:
+USER_TOKEN_TYPE = "user"  # 학생 계정 토큰 표시 (관리자 토큰엔 typ 없음)
+
+
+def create_access_token(subject_id: uuid.UUID, now: datetime | None = None, typ: str | None = None) -> str:
     now = now or datetime.now(UTC)
     expire = now + timedelta(minutes=get_settings().jwt_expire_minutes)
-    payload = {"sub": str(admin_id), "iat": now, "exp": expire}
+    payload: dict[str, object] = {"sub": str(subject_id), "iat": now, "exp": expire}
+    if typ:
+        payload["typ"] = typ
     return jwt.encode(payload, _secret(), algorithm=ALGORITHM)
 
 
-def decode_access_token(token: str) -> uuid.UUID | None:
-    """유효하면 관리자 id, 위조·만료·형식 오류면 None."""
+def decode_access_token(token: str, typ: str | None = None) -> uuid.UUID | None:
+    """유효하면 id, 위조·만료·형식 오류·토큰 종류가 다르면 None. typ=None이면 관리자 토큰만 받음."""
     try:
         payload = jwt.decode(token, _secret(), algorithms=[ALGORITHM], options={"require": ["exp", "sub"]})
+        if payload.get("typ") != typ:  # 학생 토큰으로 관리자 API를 부르거나 그 반대인 경우
+            return None
         return uuid.UUID(payload["sub"])
     except (jwt.PyJWTError, ValueError):
         return None

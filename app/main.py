@@ -29,6 +29,7 @@ from app.routers import (
     photos,
     reports,
     stats,
+    user_auth,
 )
 
 setup_logging()
@@ -52,7 +53,7 @@ app.add_middleware(
 
 API_PREFIX = "/api/v1"
 for r in (chat.router, photos.router, locations.router, reports.router, admin.router, detection.router, config_admin.router, stats.router, cron.router,
-          chat_logs.router):
+          chat_logs.router, user_auth.router):
     app.include_router(r, prefix=API_PREFIX)
 
 

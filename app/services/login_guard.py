@@ -25,17 +25,17 @@ _storage = MemoryStorage()
 _limiter = MovingWindowRateLimiter(_storage)
 
 
-def _key(request: Request, login_id: str) -> tuple[str, str]:
-    return ("admin-login", f"{client_ip(request)}|{login_id.lower()}")
+def _key(request: Request, login_id: str, scope: str) -> tuple[str, str]:
+    return (scope, f"{client_ip(request)}|{login_id.lower()}")
 
 
-def is_blocked(request: Request, login_id: str) -> bool:
-    """이미 1분 안에 5번 실패했으면 True (이번 시도는 세지 않음)."""
-    return not _limiter.test(LOGIN_FAILURE_LIMIT, *_key(request, login_id))
+def is_blocked(request: Request, login_id: str, scope: str = "admin-login") -> bool:
+    """이미 1분 안에 5번 실패했으면 True (이번 시도는 세지 않음). scope: 관리자 "admin-login" / 학생 "user-login"(1-24)."""
+    return not _limiter.test(LOGIN_FAILURE_LIMIT, *_key(request, login_id, scope))
 
 
-def record_failure(request: Request, login_id: str) -> None:
-    _limiter.hit(LOGIN_FAILURE_LIMIT, *_key(request, login_id))
+def record_failure(request: Request, login_id: str, scope: str = "admin-login") -> None:
+    _limiter.hit(LOGIN_FAILURE_LIMIT, *_key(request, login_id, scope))
 
 
 def reset_all() -> None:
