@@ -14,11 +14,14 @@ from app.models.enums import ChatIntent, ChatRole
 
 class ChatSession(Base):
     __tablename__ = "chat_sessions"
+    __table_args__ = (Index("ix_chat_sessions_user_started", "user_id", "started_at"),)
 
     id: Mapped[uuid.UUID] = uuid_pk()
     # 익명 세션쿠키 값 — "내 신고 조회" 본인 확인용
     user_identifier: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     started_at: Mapped[datetime] = created_at()
+    # 로그인한 학생이 claim한 세션만 값이 있음 — 이전 대화 조회용 (1-27, 명세 5장). 비로그인은 NULL(익명 그대로)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
 
 
 class ChatMessage(Base):

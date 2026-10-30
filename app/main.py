@@ -21,6 +21,7 @@ from app.rate_limit import limiter, rate_limit_exceeded_handler
 from app.routers import (
     admin,
     chat,
+    chat_history,
     chat_logs,
     config_admin,
     cron,
@@ -53,7 +54,7 @@ app.add_middleware(
 
 API_PREFIX = "/api/v1"
 for r in (chat.router, photos.router, locations.router, reports.router, admin.router, detection.router, config_admin.router, stats.router, cron.router,
-          chat_logs.router, user_auth.router):
+          chat_logs.router, user_auth.router, chat_history.router):
     app.include_router(r, prefix=API_PREFIX)
 
 
