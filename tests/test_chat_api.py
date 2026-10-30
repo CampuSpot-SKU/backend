@@ -1226,3 +1226,59 @@ def test_photo_only_without_uploaded_photo_or_agent_asks_for_text(client: TestCl
     res = send_with_photo(client, sid)
     assert sse_text(res) == PHOTO_FAILED
     assert PHOTO_ONLY not in [m.content for m in saved_messages(sid) if m.role.value == "assistant"]
+
+
+# ── 1-26: 글+사진 턴 — 사진 무시 금지·대화 기록에 사진 표지·사진 메모 유지 ─────────────────
+def test_text_with_photo_agent_failure_says_photo_not_seen(client: TestClient) -> None:
+    """배포 사이트(10/30): 무너진 벽 사진 + "정수기가 고장났어" → 에이전트 실패 시 사진을 무시하고 정수기 위치만 묻던 문제.
+    이제 사진을 못 봤다고 알리고, 규칙 기반 흐름으로 사진 없이 이어가지 않는다."""
+    sid = new_session(client)
+    assert upload(client, sid).status_code == 201
+    res = send_with_photo(client, sid, "3층 정수기가 고장났어요")
+    assert sse_text(res) == PHOTO_FAILED
+    user = [m for m in saved_messages(sid) if m.role.value == "user"][-1]
+    assert user.content == "3층 정수기가 고장났어요 (사진 첨부)" and "agent_error" in (user.debug_payload or {})
+
+
+def test_text_with_photo_saves_mark_and_keeps_it_out_of_report(
+    client: TestClient, photo_agent: list[dict[str, Any]]
+) -> None:
+    sid = new_session(client)
+    assert upload(client, sid).status_code == 201
+    body = send_with_photo(client, sid, "물이 계속 새요").json()
+    assert body["intent"] == "report" and photo_agent[0]["photo"] == (JPEG, "image/jpeg")
+    # 이번 턴 에이전트에게는 표지 없는 글이 간다
+    assert photo_agent[0]["conversation"][-1].content == "물이 계속 새요"
+    users = [m for m in saved_messages(sid) if m.role.value == "user"]
+    assert users[-1].content == "물이 계속 새요 (사진 첨부)"
+    # 다음 턴: 대화 기록에는 표지가 보이고(에이전트도 봄), 사진은 다시 보내지 않는다
+    nxt = send(client, sid, "혜인관 2층이요").json()
+    assert nxt["confirm_required"] is True and photo_agent[1]["photo"] is None
+    assert photo_agent[1]["conversation"][0].content == "물이 계속 새요 (사진 첨부)"
+    # 접수 — 신고 설명·제목에는 표지가 섞이지 않는다
+    done = send(client, sid, "네, 접수해 주세요", action="confirm_report").json()
+    report = get_report(done["report"]["display_no"])
+    assert "사진 첨부" not in report.description and "사진 첨부" not in (report.location_raw or "")
+
+
+def test_photo_note_survives_between_turns(client: TestClient) -> None:
+    """ai가 돌려준 photo_note가 debug_payload.state로 저장되고 다음 턴 state로 다시 전달된다 (backend AgentState에 칸이 없어 버려지던 것)."""
+    calls: list[Any] = []
+
+    def agent(conversation, state, prev_action, questions_left, buildings, candidates, hints, photo=None):  # type: ignore[no-untyped-def]
+        calls.append(state)
+        return AgentTurn(
+            action="ask", message="벽이 크게 부서진 것 같네요. 어느 건물 몇 층인가요?", choices=[],
+            state=AgentState(problem="벽이 부서졌어요", symptom="부서졌어요", problem_clear=True,
+                             photo_note="벽이 크게 부서져 있어요", missing_facility=""),
+        )
+
+    app.dependency_overrides[get_agent] = lambda: agent
+    try:
+        sid = new_session(client)
+        assert upload(client, sid).status_code == 201
+        send_with_photo(client, sid)
+        send(client, sid, "아까 보낸 사진 봤어?")
+    finally:
+        app.dependency_overrides.pop(get_agent, None)
+    assert calls[0] is None and calls[1] is not None and calls[1].photo_note == "벽이 크게 부서져 있어요"

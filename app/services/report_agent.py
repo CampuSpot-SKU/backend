@@ -49,13 +49,51 @@ MAX_STUDENT_TURNS = 10
 CONFIRM_CHOICES = ["네, 접수해 주세요", "내용을 고칠래요", "취소할게요"]
 GIVE_UP = "신고 내용을 정확히 알기 어려워서 접수는 하지 않을게요. 어떤 시설에 무슨 문제가 있는지 알려주시면 다시 도와드릴게요."
 PHOTO_ONLY_TEXT = "(사진을 보냈어요)"  # 학생이 글 없이 사진만 보냈을 때 content로 저장되는 자리표시 — 신고 내용이 아님
+# 글과 함께 사진을 보낸 학생 메시지 끝에 붙여 저장하는 표지 (1-26) — 관리자 신고 대화·이전 대화에서 보이게.
+# 신고 설명·제목·건물 찾기에는 섞지 않는다 (without_photo_mark로 떼고 씀)
+PHOTO_MARK = "(사진 첨부)"
+
+
+def with_photo_mark(text: str) -> str:
+    return text if text == PHOTO_ONLY_TEXT or text.endswith(PHOTO_MARK) else f"{text} {PHOTO_MARK}"
+
+
+def without_photo_mark(text: str) -> str:
+    return text[: -len(PHOTO_MARK)].rstrip() if text.endswith(PHOTO_MARK) else text
+
+
+@dataclass
+class _Unmarked:
+    """대화 기록 한 줄의 사본 — 사진 표지를 뗀 content (규칙 기반 흐름의 collect_draft가 표지를 신고 내용으로 읽지 않게)."""
+
+    role: object
+    content: str
+    intent: object
+    intent_scores: dict[str, object] | None
+    debug_payload: dict[str, object] | None
+    created_at: object = None
+
+
+def without_photo_marks(history: Sequence[object]) -> list[object]:
+    out: list[object] = []
+    for m in history:
+        content = str(getattr(m, "content", ""))
+        if getattr(m, "role", None) == ChatRole.USER and content.endswith(PHOTO_MARK):
+            out.append(_Unmarked(
+                role=getattr(m, "role", None), content=without_photo_mark(content), intent=getattr(m, "intent", None),
+                intent_scores=getattr(m, "intent_scores", None), debug_payload=getattr(m, "debug_payload", None),
+                created_at=getattr(m, "created_at", None),
+            ))
+        else:
+            out.append(m)
+    return out
 # 7개 위치 인자(conversation, state, prev_action, questions_left, buildings, candidates, hints) + 사진 턴에만 photo=(bytes, mime) 키워드
 Agent = Callable[..., AgentTurn]
 
 
 def _real_texts(texts: Sequence[str]) -> list[str]:
     """자리표시를 뺀 학생 말 — 건물 찾기·접수 내용(description)에 쓴다."""
-    return [t for t in texts if t != PHOTO_ONLY_TEXT]
+    return [without_photo_mark(t) for t in texts if t != PHOTO_ONLY_TEXT]
 
 
 @dataclass
@@ -100,7 +138,7 @@ def report_tail(history: Sequence[object]) -> Tail:
         if role == ChatRole.USER:
             tail.conversation.append(HistoryItem(role="user", content=content))
             if content != PHOTO_ONLY_TEXT:
-                tail.user_texts.append(content)
+                tail.user_texts.append(without_photo_mark(content))  # 대화(conversation)에는 표지를 남겨 에이전트도 봄
             tail.student_turns += 1
         else:
             tail.conversation.append(HistoryItem(role="assistant", content=content))

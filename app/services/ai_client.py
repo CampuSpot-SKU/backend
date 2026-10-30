@@ -168,7 +168,10 @@ class AgentState(BaseModel):
     near: list[str] = []
     near_relation: Literal["none", "attached", "apart", "between"] = "none"
     staff_check: list[str] = []
+    missing_facility: str = ""  # 학교에 없는 시설 이름 — 턴 사이에 유지해야 확인 뒤 거절이 동작 (S-4)
     pending_issues: list[str] = []
+    photo_note: str = ""  # 이 신고 대화에서 받은 사진에 보인 것 — 다음 턴에도 사진을 기억하려고 state로 저장 (1-26)
+    photo_conflict: bool = False  # 이번 턴 사진이 글과 다른 문제를 보여줌 (ai가 되묻기를 만듦, 1-26)
 
 
 class AgentTurn(BaseModel):

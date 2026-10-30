@@ -131,7 +131,7 @@ Answerer = Callable[[str], RagAnswer]
 Judge = Callable[[ReportSlots, str], ReportSlots]  # 규칙으로 뽑은 슬롯 → AI 판정을 반영한 슬롯
 # 접수된 신고 id → 대기 사진을 옮긴 저장소 경로(사진 없음·저장소 실패면 None) — 작업 1-10
 AttachPhoto = Callable[[uuid.UUID], str | None]
-PHOTO_FAILED = "사진을 분석하지 못했어요. 어떤 문제가 있는지 글로 알려주시겠어요?"  # 사진만 보냈는데 AI가 못 본 경우 (10/30)
+PHOTO_FAILED = "사진을 분석하지 못했어요. 어떤 문제가 있는지 글로 알려주시겠어요?"  # 사진을 보냈는데 AI가 못 본 경우 (10/30, 글+사진도 1-26)
 PHOTO_SENT = " 사진도 함께 전달했어요."  # 사진이 붙은 접수만 완료 문구 끝에 붙임 (명세 5-1)
 
 
@@ -276,7 +276,7 @@ def send_message(
         })
 
     history = _recent_history(db, session_id)
-    draft = collect_draft(history)
+    draft = collect_draft(ra.without_photo_marks(history))  # type: ignore[arg-type]  # 사진 표지는 신고 내용이 아님 (1-26)
     user_msg = _add_message(db, session_id, ChatRole.USER, text, _next_ts(history))
     action = body.action
     say_history = [HistoryItem(role=m.role.value, content=m.content) for m in history[-3:]]
@@ -325,6 +325,9 @@ def send_message(
     # 사진이 함께 온 턴(10/30): 에이전트가 사진을 직접 보고 답함. 사진만 보낸 경우(자리표시 문구)는 의도분류를 건너뜀
     in_agent_flow = draft.in_progress and draft.last_kind == ra.AGENT_KIND
     turn_photo = judge_photo() if (body.with_photo and action is None) else None
+    if turn_photo is not None:
+        # 글과 함께 사진을 보냈으면 대화 기록에 표지를 남김 — 관리자 신고 대화·이전 대화에서 보이고, 에이전트도 다음 턴에 봄 (1-26)
+        user_msg.content = ra.with_photo_mark(text)
     if text == ra.PHOTO_ONLY_TEXT and action is None:
         if turn_photo is None or (draft.in_progress and not in_agent_flow):
             return _photo_failed(db, session_id, user_msg, keep_flow=in_agent_flow)
@@ -359,7 +362,7 @@ def send_message(
         except AiServiceError as e:
             logger.warning("신고 에이전트 실패 → 규칙 기반 흐름으로 대체: %s", e)
             user_msg.debug_payload = {"agent_error": str(e)[:300]}
-            if text == ra.PHOTO_ONLY_TEXT:  # 사진만 보낸 턴은 규칙 기반 흐름이 이해하지 못함
+            if turn_photo is not None:  # 사진이 온 턴은 규칙 기반 흐름이 사진을 못 봄 — 무시하고 넘어가지 않고 알림 (1-26)
                 return _photo_failed(db, session_id, user_msg, keep_flow=True)
 
     # 1) 신고 흐름 중(되묻기·요약 확인에 대한 답변) → 의도분류 생략하고 슬롯필링 계속
@@ -460,6 +463,10 @@ def send_message(
     except AiServiceError as e:
         logger.warning("신고 에이전트 실패 → 규칙 기반 흐름으로 대체: %s", e)
         user_msg.debug_payload = {**(user_msg.debug_payload or {}), "agent_error": str(e)[:300]}
+        if turn_photo is not None:
+            # 사진을 보냈는데 에이전트가 실패 → 사진을 무시한 채 글로만 이어가지 않고 사진을 못 봤다고 알림
+            # (배포 사이트 10/30: 무너진 벽 사진 + "정수기가 고장났어"에 사진 언급 없이 정수기 위치만 물음, 1-26)
+            return _photo_failed(db, session_id, user_msg, keep_flow=False)
 
     # 3-0) (대체 경로) 신고로 접수하기 어려운 말 — 흐름을 시작하지 않고 한 번 되물음
     asked_before = bool(history) and (
@@ -489,7 +496,7 @@ def _first_tail(history: list[ChatMessage], draft: Draft) -> ra.Tail:
     if len(history) >= 2 and history[-1].role == ChatRole.ASSISTANT and (
         history[-1].debug_payload or {}
     ).get("kind") == ra.DECLINE_KIND and history[-2].role == ChatRole.USER:
-        texts = [history[-2].content]
+        texts = [ra.without_photo_mark(history[-2].content)]
         conversation = [
             HistoryItem(role="user", content=history[-2].content),
             HistoryItem(role="assistant", content=history[-1].content),
@@ -650,7 +657,7 @@ def _inquiry_question(history: list[ChatMessage], text: str) -> str:
         and history[-2].role == ChatRole.USER
         and history[-2].intent == ChatIntent.UNCLEAR
     ):
-        return f"{history[-2].content} {text}"
+        return f"{ra.without_photo_mark(history[-2].content)} {text}"
     return text
 
 
