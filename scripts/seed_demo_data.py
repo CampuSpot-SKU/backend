@@ -1,11 +1,14 @@
 """시연용 데모 데이터 시딩·초기화 — Actions "Seed demo data"에서 실행 (작업 S-2).
 
-실행: DATABASE_URL=... python scripts/seed_demo_data.py [--apply] [--reset-only] [--purge-test]
+실행: DATABASE_URL=... python scripts/seed_demo_data.py [--apply] [--reset-only] [--purge-test] [--purge-chat]
 - 기본은 미리보기: 무엇이 바뀔지만 출력하고 DB는 그대로 둔다
 - --apply를 붙여야 실제로 저장한다 (한 번의 트랜잭션 — 중간에 실패하면 전부 되돌려짐)
 - --reset-only: 데모 신고만 지운다 (새로 넣지 않음)
 - --purge-test: 데모가 아닌 신고 전부(운영 DB의 테스트 신고)를 먼저 지운다. 되돌릴 수 없다.
   미리보기에서 지울 접수번호 목록을 보여준다. 다 지워지면 접수번호도 1번부터 다시 시작한다.
+- --purge-chat: 개발·점검 중 쌓인 테스트 채팅(문의 로그 포함)을 지운다 — 데모가 아니고, 신고가 붙어 있지 않고,
+  로그인 계정에 연결되지 않은 세션. --purge-test와 같이 쓰면 테스트 신고의 세션도 함께 지워진다. 되돌릴 수 없다.
+- 신고마다 대화 세션 1개와 대화 기록(접수 완료 안내·AI 판정 이유 포함)을 같이 넣는다 (S-2b).
 형식·시나리오는 app/services/demo_data.py 참고.
 """
 import argparse
@@ -25,6 +28,9 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true", help="실제로 DB에 저장 (없으면 미리보기)")
     parser.add_argument("--reset-only", action="store_true", help="데모 신고만 지우고 새로 넣지 않음")
     parser.add_argument("--purge-test", action="store_true", help="데모가 아닌 신고 전부 삭제 (되돌릴 수 없음)")
+    parser.add_argument(
+        "--purge-chat", action="store_true", help="테스트 채팅(문의 로그 포함) 삭제 — 신고·로그인 계정이 붙은 세션은 남김 (되돌릴 수 없음)"
+    )
     args = parser.parse_args()
 
     now = datetime.now(UTC)
@@ -44,6 +50,12 @@ def main() -> int:
                 print(f"  - {n}번: {d}…")
         else:
             print("- 테스트 신고는 그대로 둠 (지우려면 purge_test 선택)")
+        chat_sessions, chat_messages = demo_data.count_orphan_chat(db)
+        if args.purge_chat:
+            note = " (테스트 신고도 함께 지우면 그 신고의 세션까지 늘어남)" if not args.purge_test else ""
+            print(f"- ⚠️ 삭제 대상 테스트 채팅: 세션 {chat_sessions}개·메시지 {chat_messages}개{note}")
+        else:
+            print(f"- 테스트 채팅 {chat_sessions}개 세션은 그대로 둠 (지우려면 purge_chat 선택)")
 
         if not args.apply:
             if not args.reset_only:
@@ -53,6 +65,9 @@ def main() -> int:
         if args.purge_test:
             removed = demo_data.purge_non_demo(db)
             print(f"\n테스트 신고 {removed}건 삭제")
+        if args.purge_chat:
+            removed_chat = demo_data.purge_orphan_chat(db)
+            print(f"테스트 채팅 세션 {removed_chat}개 삭제")
         removed_demo = demo_data.reset_demo(db)
         print(f"데모 신고 {removed_demo}건 삭제")
         if not args.reset_only:
@@ -64,6 +79,7 @@ def main() -> int:
                 f"데모 신고 {counts.reports}건 입력 — 진행 중 {counts.open}건, 해결·종료 {counts.resolved_or_closed}건 "
                 f"(SLA 준수 {counts.sla_met} / 초과 {counts.sla_breached})"
             )
+            print(f"대화 세션 {counts.sessions}개·메시지 {counts.messages}개 입력 (관리자 상세의 '신고 대화'에서 보임)")
         db.commit()
     except Exception:
         db.rollback()

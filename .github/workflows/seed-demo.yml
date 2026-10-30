@@ -5,6 +5,8 @@ name: Seed demo data (수동 실행)
 #   mode: preview = 미리보기(DB 그대로) / apply = 데모 신고를 지우고 새로 넣기 / reset = 데모 신고만 지우기
 #   purge_test: 켜면 데모가 아닌 신고(운영 DB의 테스트 신고)를 전부 먼저 지움 — 되돌릴 수 없음.
 #               반드시 preview로 삭제 대상 접수번호를 먼저 확인할 것.
+#   purge_chat: 켜면 개발·점검 중 쌓인 테스트 채팅(문의 로그 포함)을 지움 — 신고·로그인 계정이 붙은 세션은 남김.
+#               지금 사이트를 쓰는 사람의 대화도 지워지니 촬영 직전에 한 번만. preview로 개수를 먼저 확인할 것.
 # 결과는 Summary에 남는다. 넣은 뒤에는 탐지·예측 배치를 한 번 실행해야 후보·예측이 채워진다.
 on:
   workflow_dispatch:
@@ -16,6 +18,10 @@ on:
         default: preview
       purge_test:
         description: "데모가 아닌 신고(테스트 신고) 전부 삭제 — 되돌릴 수 없음"
+        type: boolean
+        default: false
+      purge_chat:
+        description: "테스트 채팅(문의 로그 포함) 삭제 — 신고·로그인 계정이 붙은 세션은 남김, 되돌릴 수 없음"
         type: boolean
         default: false
 
@@ -44,10 +50,12 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           MODE: ${{ inputs.mode }}
           PURGE_TEST: ${{ inputs.purge_test }}
+          PURGE_CHAT: ${{ inputs.purge_chat }}
         run: |
           set -o pipefail
           flags=""
           if [ "$MODE" = "apply" ]; then flags="--apply"; fi
           if [ "$MODE" = "reset" ]; then flags="--apply --reset-only"; fi
           if [ "$PURGE_TEST" = "true" ]; then flags="$flags --purge-test"; fi
+          if [ "$PURGE_CHAT" = "true" ]; then flags="$flags --purge-chat"; fi
           python scripts/seed_demo_data.py $flags | tee -a "$GITHUB_STEP_SUMMARY"

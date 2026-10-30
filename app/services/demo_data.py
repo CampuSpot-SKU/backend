@@ -7,13 +7,19 @@
   초기화(reset)는 이 세션에 붙은 신고만 지운다. 실제 신고는 건드리지 않는다.
 - 시각은 실행 시점(now) 기준 상대값이라, 시연 직전에 reset → apply를 다시 하면 "최근 데이터"가 된다.
 - 임베딩(reports.embedding)은 비워 둔다 — 탐지 배치(ai detection-scan)가 채운다.
+- (S-2b, 10/30) ① 5일 넘은 신고는 접수 시각의 시·분·초를 학생 활동 시간대로 흩뿌린다(전부 같은 초로 찍히던 것 해소).
+  ② 신고마다 대화 세션 1개와 대화 기록(원문 말투 → 되묻기 → 요약 → 접수 완료 안내·AI 판정 이유)을 함께 넣어
+  관리자 "신고 대화" 구역(1-25)이 채워지게 한다. ③ 운영 DB의 테스트 채팅(문의 로그 포함)을 지우는 purge_chat.
+  문의 로그는 가짜로 만들지 않는다(학칙 인용이 틀리면 안 되므로 촬영 전 사이트에서 실제 질문).
 - 하는 일은 scripts/seed_demo_data.py(Actions "Seed demo data")가 호출한다. 형식·시나리오는 맨 아래 build_plan.
 """
 from __future__ import annotations
 
+import random
+import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, cast
 
 from sqlalchemy import delete, func, select, text
@@ -21,13 +27,18 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from app.models.admin import Admin
-from app.models.chat import ChatSession
+from app.models.chat import ChatMessage, ChatSession
 from app.models.config import Building, Category, SlaConfig
-from app.models.enums import Priority, ReportStatus
+from app.models.enums import ChatIntent, ChatRole, Priority, ReportStatus
 from app.models.problem import PredictionStat
 from app.models.report import Report, ReportStatusHistory
+from app.services.slot_filling import DONE_PREFIX
 
 DEMO_IDENTIFIER = "demo-seed"
+KST = timezone(timedelta(hours=9))
+SPREAD_FROM_DAYS = 5.0  # 이보다 오래된 신고만 접수 시각을 흩뿌린다(최근 신고·몰림 시나리오는 "지금 − N일" 그대로)
+# 학생이 신고하는 시간대(KST) 가중치 — 수업 시간 사이 오전~오후에 몰리고 밤엔 드묾
+HOUR_WEIGHTS = {8: 3, 9: 6, 10: 9, 11: 10, 12: 8, 13: 8, 14: 9, 15: 9, 16: 8, 17: 6, 18: 5, 19: 3, 20: 3, 21: 2}
 DEFAULT_SLA_HOURS = {"P1": 4, "P2": 24, "P3": 72, "P4": 168}
 
 # 카테고리별 담당 부서 이름(시연용 가상 이름 — 실제 학교 부서명이 아님)
@@ -193,9 +204,25 @@ def build_plan() -> list[DemoSpec]:
     return plan
 
 
+def _rng(spec: DemoSpec, salt: str) -> random.Random:
+    """신고마다 항상 같은 값이 나오는 난수 — 같은 시점에 다시 넣어도 같은 데이터, 테스트도 안정적."""
+    return random.Random(zlib.crc32(f"{salt}|{spec.building}|{spec.floor}|{spec.description}".encode()))
+
+
+def created_at_for(spec: DemoSpec, now: datetime) -> datetime:
+    """접수 시각. 5일 넘은 신고는 그날(KST)의 학생 활동 시간대로 시·분·초를 정한다."""
+    base = now - timedelta(days=spec.days_ago)
+    if spec.days_ago < SPREAD_FROM_DAYS:
+        return base
+    rng = _rng(spec, "time")
+    hour = rng.choices(list(HOUR_WEIGHTS), weights=list(HOUR_WEIGHTS.values()))[0]
+    local = base.astimezone(KST).replace(hour=hour, minute=rng.randrange(60), second=rng.randrange(60), microsecond=0)
+    return local.astimezone(base.tzinfo or UTC)
+
+
 def timeline(spec: DemoSpec, now: datetime) -> list[Step]:
     """접수부터 target 단계까지의 상태 이력. 시각이 now를 넘는 단계는 만들지 않는다."""
-    created = now - timedelta(days=spec.days_ago)
+    created = created_at_for(spec, now)
     at = {
         ReportStatus.RECEIVED: created,
         ReportStatus.ASSIGNED: created + timedelta(hours=ASSIGN_AFTER_H),
@@ -226,6 +253,102 @@ def final_status(spec: DemoSpec, now: datetime) -> ReportStatus:
     return timeline(spec, now)[-1].status
 
 
+# ---------------------------------------------------------------- 대화 기록 (S-2b)
+
+REASON_BY_PRIORITY = {
+    "P1": [
+        "다치거나 사고로 이어질 수 있는 안전 문제라 바로 확인이 필요하다고 봤어요.",
+        "안전과 직접 관련된 문제라 지금 바로 확인이 필요하다고 판단했어요.",
+    ],
+    "P2": [
+        "여러 사람이 쓰는 공간이고 불편이 커서 빨리 처리해야 한다고 봤어요.",
+        "이용하는 사람이 많은 곳이고 당장 지장이 커서 서둘러 처리가 필요하다고 봤어요.",
+    ],
+    "P3": [
+        "여러 사람이 쓰는 공간이지만 급한 위험 신호는 없다고 봤어요.",
+        "이용에 불편은 있지만 안전과 관련된 신호는 없다고 판단했어요.",
+    ],
+    "P4": [
+        "당장 위험하거나 이용에 큰 지장은 없는 문제라고 봤어요.",
+        "급하지 않은 불편이라 일정에 맞춰 처리해도 된다고 봤어요.",
+    ],
+}
+_PREFIXES = ["", "", "저기 ", "혹시 ", "안녕하세요 "]
+_SUFFIXES = ["", "", "", "ㅠㅠ", " 확인 부탁드려요", "...", " 빨리 와주세요"]
+_CONFIRMS = ["네 접수해 주세요", "네", "네 그렇게 접수해주세요", "넵 접수해주세요", "네 맞아요 접수할게요"]
+
+
+@dataclass(frozen=True)
+class DemoMessage:
+    role: ChatRole
+    content: str
+    at: datetime
+    intent: ChatIntent | None
+    intent_scores: dict[str, Any] | None = None
+
+
+def location_text(spec: DemoSpec) -> str:
+    """"혜인관 2층 화장실"처럼 접수 완료 안내에 쓰는 위치."""
+    parts = [spec.building]
+    if spec.floor:
+        parts.append(f"{spec.floor}층" if spec.floor.isdigit() else f"지하{spec.floor[1:]}층" if spec.floor.startswith("B") else spec.floor)
+    if spec.detail:
+        parts.append(spec.detail)
+    return " ".join(parts)
+
+
+def build_dialogue(spec: DemoSpec, display_no: int, created: datetime) -> list[DemoMessage]:
+    """접수까지의 대화. 마지막 메시지(접수 완료 안내)만 intent가 없다 — conversation_query.pick_flow가 끝으로 찾는 표시.
+
+    같은 신고는 항상 같은 대화가 나온다. 일부는 층·건물·남/여를 한 번 되묻는 흐름이다(실제 에이전트의 되묻기와 같은 모양).
+    """
+    rng = _rng(spec, "dialogue")
+    desc = spec.description
+    first = desc
+    asks: list[tuple[str, str]] = []  # (챗봇 질문, 학생 답)
+    floor = spec.floor or ""
+    floor_in = floor.isdigit() and f"{floor}층" in desc
+    is_toilet = spec.detail == "화장실"
+    roll = rng.random()
+    if floor_in and roll < 0.35:  # 층을 빼고 말한 경우 → 층(화장실이면 남/여까지 한 번에) 되묻기
+        first = " ".join(desc.replace(f"{floor}층", "", 1).split())
+        if is_toilet:
+            gender = rng.choice(["남자", "여자"])
+            asks.append((f"{spec.building} 몇 층 남자/여자 화장실인가요?", f"{floor}층 {gender} 화장실이에요"))
+        else:
+            asks.append((f"{spec.building} 몇 층인가요?", f"{floor}층이요"))
+    elif spec.building in desc and roll > 0.88:  # 건물을 빼고 말한 경우 → 건물 되묻기
+        first = " ".join(desc.replace(spec.building, "", 1).split())
+        asks.append(("어느 건물인가요?", f"{spec.building}이에요"))
+    first = rng.choice(_PREFIXES) + first + rng.choice(_SUFFIXES)
+
+    score = rng.randint(88, 99)
+    seq: list[tuple[ChatRole, str, ChatIntent | None, float, dict[str, Any] | None]] = [
+        (ChatRole.USER, first, ChatIntent.REPORT, 0.0, {"report_score": score, "inquiry_score": 100 - score}),
+    ]
+    for question, answer in asks:
+        seq.append((ChatRole.ASSISTANT, question, ChatIntent.REPORT, rng.uniform(2.5, 5.0), None))
+        seq.append((ChatRole.USER, answer, ChatIntent.REPORT, rng.uniform(12, 40), None))
+    seq.append(
+        (ChatRole.ASSISTANT, f"“{desc}” 내용으로 정리했어요. 이대로 접수할까요?", ChatIntent.REPORT, rng.uniform(2.5, 5.0), None)
+    )
+    seq.append((ChatRole.USER, rng.choice(_CONFIRMS), ChatIntent.REPORT, rng.uniform(6, 25), None))
+    done = (
+        f"{DONE_PREFIX}! 접수번호는 {display_no}번이에요. {location_text(spec)}에서 생긴 {spec.category} 문제로 분류했어요. "
+        f"{rng.choice(REASON_BY_PRIORITY[spec.priority])} 그래서 {spec.priority}로 판단했어요. 담당 부서에서 확인 후 처리할게요."
+    )
+    seq.append((ChatRole.ASSISTANT, done, None, rng.uniform(2.5, 5.0), None))
+
+    # 마지막(접수 완료 안내)을 접수 시각 1초 뒤에 두고 거꾸로 시각을 계산
+    at = created + timedelta(seconds=1)
+    out: list[DemoMessage] = []
+    for role, content, intent, gap, scores in reversed(seq):
+        out.append(DemoMessage(role, content, at, intent, scores))
+        at -= timedelta(seconds=gap)
+    out.reverse()
+    return out
+
+
 # ---------------------------------------------------------------- DB
 
 
@@ -236,6 +359,8 @@ class Counts:
     resolved_or_closed: int
     sla_met: int
     sla_breached: int
+    sessions: int = 0
+    messages: int = 0
 
 
 def count_demo(db: Session) -> int:
@@ -293,6 +418,42 @@ def purge_non_demo(db: Session) -> int:
     return int(result.rowcount or 0)
 
 
+def _orphan_chat_filter() -> list[Any]:
+    """지워도 되는 채팅 세션: 데모가 아니고, 신고가 붙어 있지 않고, 로그인 계정에 연결되지 않은 것."""
+    reported = select(Report.session_id).where(Report.session_id.is_not(None))
+    return [
+        ChatSession.user_identifier != DEMO_IDENTIFIER,
+        ChatSession.id.not_in(reported),
+        ChatSession.user_id.is_(None),
+    ]
+
+
+def count_orphan_chat(db: Session) -> tuple[int, int]:
+    """(세션 수, 메시지 수) — purge_chat 미리보기용."""
+    cond = _orphan_chat_filter()
+    sessions = int(db.scalar(select(func.count()).select_from(ChatSession).where(*cond)) or 0)
+    messages = int(
+        db.scalar(
+            select(func.count())
+            .select_from(ChatMessage)
+            .join(ChatSession, ChatMessage.session_id == ChatSession.id)
+            .where(*cond)
+        )
+        or 0
+    )
+    return sessions, messages
+
+
+def purge_orphan_chat(db: Session) -> int:
+    """개발·점검 중 쌓인 테스트 채팅(문의 로그 포함)을 지운다. 되돌릴 수 없다. 지운 세션 수를 돌려준다.
+
+    신고가 붙은 세션과 로그인 계정에 연결된 세션은 남긴다. purge_non_demo(테스트 신고 삭제) 뒤에 부르면 신고가 없어져
+    그 신고의 세션도 지워진다. 지금 사이트를 쓰는 사람의 대화도 지워지니 촬영 직전 한 번만 쓸 것.
+    """
+    result = cast("CursorResult[Any]", db.execute(delete(ChatSession).where(*_orphan_chat_filter())))
+    return int(result.rowcount or 0)
+
+
 def _clear_derived(db: Session) -> None:
     db.execute(delete(PredictionStat))  # 예측 배치가 통째로 다시 만드는 표
     _delete_empty_clusters(db)
@@ -312,11 +473,8 @@ def insert_plan(db: Session, specs: Sequence[DemoSpec], now: datetime) -> Counts
     buildings = {b.name: b.id for b in db.scalars(select(Building))}
     sla_hours = {s.priority.value: s.sla_hours for s in db.scalars(select(SlaConfig))}
     admins = list(db.scalars(select(Admin.id).order_by(Admin.login_id)))
-    session = ChatSession(user_identifier=DEMO_IDENTIFIER, started_at=now - timedelta(days=60))
-    db.add(session)
-    db.flush()
 
-    open_n = done_n = met = breached = 0
+    open_n = done_n = met = breached = message_n = 0
     for i, spec in enumerate(specs):
         if spec.category not in categories:
             raise ValueError(f"카테고리 '{spec.category}'가 없어요 (설정 > 카테고리 확인)")
@@ -326,6 +484,9 @@ def insert_plan(db: Session, specs: Sequence[DemoSpec], now: datetime) -> Counts
         created = steps[0].at
         deadline = created + timedelta(hours=sla_hours.get(spec.priority, DEFAULT_SLA_HOURS[spec.priority]))
         last = steps[-1]
+        session = ChatSession(user_identifier=DEMO_IDENTIFIER, started_at=created - timedelta(minutes=3))
+        db.add(session)
+        db.flush()
         report = Report(
             session_id=session.id,
             category_id=categories[spec.category],
@@ -342,7 +503,21 @@ def insert_plan(db: Session, specs: Sequence[DemoSpec], now: datetime) -> Counts
             updated_at=last.at,
         )
         db.add(report)
-        db.flush()
+        db.flush()  # display_no가 정해져야 접수 완료 안내 문구에 번호를 쓸 수 있음
+        dialogue = build_dialogue(spec, report.display_no, created)
+        session.started_at = dialogue[0].at - timedelta(seconds=20)
+        for m in dialogue:
+            db.add(
+                ChatMessage(
+                    session_id=session.id,
+                    role=m.role,
+                    content=m.content,
+                    intent=m.intent,
+                    intent_scores=m.intent_scores,
+                    created_at=m.at,
+                )
+            )
+        message_n += len(dialogue)
         for j, step in enumerate(steps):
             db.add(
                 ReportStatusHistory(
@@ -363,6 +538,6 @@ def insert_plan(db: Session, specs: Sequence[DemoSpec], now: datetime) -> Counts
                 met += 1
             else:
                 breached += 1
-    return Counts(len(specs), open_n, done_n, met, breached)
+    return Counts(len(specs), open_n, done_n, met, breached, sessions=len(specs), messages=message_n)
 
 
