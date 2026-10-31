@@ -38,6 +38,7 @@ class ReportClusterRef(BaseModel):
     id: uuid.UUID
     report_count: int  # 그 묶음에 묶인 신고 전체 수
     status: ClusterStatus
+    whole_building: bool = False  # 호실이 달라도 건물 전체 원인으로 묶인 건
 
 
 class AdminReportItem(BaseModel):

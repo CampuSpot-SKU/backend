@@ -23,6 +23,9 @@ from app.schemas.admin import (
     StatusHistoryItem,
 )
 
+# ai 탐지가 호실이 다른 신고를 건물 전체 원인으로 묶을 때 쓰는 세부위치 (ai/detection.py WHOLE_BUILDING과 같은 값)
+WHOLE_BUILDING = "건물 전체"
+
 # SLA를 따지는 상태 (해결·종료는 이미 끝난 건이라 제외)
 OPEN_STATUSES = (ReportStatus.RECEIVED, ReportStatus.ASSIGNED, ReportStatus.IN_PROGRESS)
 
@@ -88,7 +91,7 @@ def cluster_refs(db: Session, report_ids: list[uuid.UUID]) -> dict[uuid.UUID, Re
             problem_cluster_reports.c.report_id,
             ProblemCluster.id,
             ProblemCluster.status,
-            ProblemCluster.detected_at,
+            ProblemCluster.detail,
         )
         .join(ProblemCluster, ProblemCluster.id == problem_cluster_reports.c.cluster_id)
         .where(
@@ -97,8 +100,8 @@ def cluster_refs(db: Session, report_ids: list[uuid.UUID]) -> dict[uuid.UUID, Re
         )
         .order_by(ProblemCluster.detected_at.asc())  # 나중 것이 덮어씀
     ).all()
-    chosen = {rid: (cid, status) for rid, cid, status, _ in rows}
-    cluster_ids = {cid for cid, _ in chosen.values()}
+    chosen = {rid: (cid, status, detail) for rid, cid, status, detail in rows}
+    cluster_ids = {cid for cid, _, _ in chosen.values()}
     counts: dict[uuid.UUID, int] = {}
     if cluster_ids:
         for cid, n in db.execute(
@@ -108,8 +111,13 @@ def cluster_refs(db: Session, report_ids: list[uuid.UUID]) -> dict[uuid.UUID, Re
         ).all():
             counts[cid] = n
     return {
-        rid: ReportClusterRef(id=cid, report_count=counts.get(cid, 0), status=status)
-        for rid, (cid, status) in chosen.items()
+        rid: ReportClusterRef(
+            id=cid,
+            report_count=counts.get(cid, 0),
+            status=status,
+            whole_building=detail == WHOLE_BUILDING,
+        )
+        for rid, (cid, status, detail) in chosen.items()
     }
 
 

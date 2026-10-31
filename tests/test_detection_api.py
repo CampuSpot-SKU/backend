@@ -69,13 +69,14 @@ def _refs() -> tuple[Building, Category]:
 
 
 def make_cluster(detected_ago_h: float, n_reports: int, with_building: bool = True,
-                 status: ClusterStatus = ClusterStatus.CANDIDATE) -> uuid.UUID:
+                 status: ClusterStatus = ClusterStatus.CANDIDATE,
+                 detail: str = "2층 화장실") -> uuid.UUID:
     """배치 대신 후보 한 건 + 묶인 신고 n건을 넣음."""
     building, category = _refs()
     db = get_sessionmaker()()
     c = ProblemCluster(
         building_id=building.id if with_building else None,
-        detail="2층 화장실" if with_building else None,
+        detail=detail if with_building else None,
         category_id=category.id,
         detected_at=datetime.now(UTC) - timedelta(hours=detected_ago_h),
         status=status,
@@ -173,7 +174,7 @@ def test_cluster_detail_lists_member_reports(client: TestClient, headers: dict[s
     body = res.json()
     assert body["id"] == str(c) and len(body["reports"]) == 3
     assert all(r["description"] == "테스트 신고(탐지)" for r in body["reports"])
-    assert all(r["cluster"] == {"id": str(c), "report_count": 3, "status": "후보"} for r in body["reports"])
+    assert all(r["cluster"] == {"id": str(c), "report_count": 3, "status": "후보", "whole_building": False} for r in body["reports"])
     times = [r["created_at"] for r in body["reports"]]
     assert times == sorted(times)  # 접수 순
     assert client.get(f"{BASE}/problem-clusters/{uuid.uuid4()}", headers=headers).status_code == 404
@@ -182,6 +183,13 @@ def test_cluster_detail_lists_member_reports(client: TestClient, headers: dict[s
     one = client.get(f"{BASE}/reports/{body['reports'][0]['id']}", headers=headers).json()
     assert one["cluster"]["id"] == str(c)
     assert {r["id"] for r in one["cluster_reports"]} == {r["id"] for r in body["reports"]}
+
+
+def test_whole_building_cluster_is_flagged_on_reports(client: TestClient, headers: dict[str, str]) -> None:
+    c = make_cluster(detected_ago_h=1, n_reports=3, detail="건물 전체")
+    body = client.get(f"{BASE}/problem-clusters/{c}", headers=headers).json()
+    assert body["detail"] == "건물 전체"
+    assert all(r["cluster"]["whole_building"] is True for r in body["reports"])
 
 
 def test_cluster_advance_moves_reports_forward_only(client: TestClient, headers: dict[str, str]) -> None:
