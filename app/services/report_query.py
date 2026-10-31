@@ -8,13 +8,16 @@ from sqlalchemy.orm import Session
 
 from app.models.admin import Admin
 from app.models.config import Building, Category
-from app.models.enums import Priority, ReportStatus
+from app.models.enums import ClusterStatus, Priority, ReportStatus
+from app.models.problem import ProblemCluster, problem_cluster_reports
 from app.models.report import Report, ReportStatusHistory
 from app.schemas.admin import (
     AdminReportDetail,
     AdminReportItem,
     AdminReportList,
     NamedRef,
+    ReportClusterRef,
+    ReportSummary,
     SlaStatus,
     SortKey,
     StatusHistoryItem,
@@ -72,7 +75,78 @@ def _item_fields(
         "sla_deadline": report.sla_deadline,
         "sla_status": sla_status_of(report.status, report.created_at, report.sla_deadline, now),
         "created_at": report.created_at,
+        "description": report.description,
     }
+
+
+def cluster_refs(db: Session, report_ids: list[uuid.UUID]) -> dict[uuid.UUID, ReportClusterRef]:
+    """신고가 묶인 반복 신고 묶음 (기각된 묶음은 제외, 여러 개면 가장 최근에 감지된 것)."""
+    if not report_ids:
+        return {}
+    rows = db.execute(
+        select(
+            problem_cluster_reports.c.report_id,
+            ProblemCluster.id,
+            ProblemCluster.status,
+            ProblemCluster.detected_at,
+        )
+        .join(ProblemCluster, ProblemCluster.id == problem_cluster_reports.c.cluster_id)
+        .where(
+            problem_cluster_reports.c.report_id.in_(report_ids),
+            ProblemCluster.status != ClusterStatus.REJECTED,
+        )
+        .order_by(ProblemCluster.detected_at.asc())  # 나중 것이 덮어씀
+    ).all()
+    chosen = {rid: (cid, status) for rid, cid, status, _ in rows}
+    cluster_ids = {cid for cid, _ in chosen.values()}
+    counts: dict[uuid.UUID, int] = {}
+    if cluster_ids:
+        for cid, n in db.execute(
+            select(problem_cluster_reports.c.cluster_id, func.count())
+            .where(problem_cluster_reports.c.cluster_id.in_(cluster_ids))
+            .group_by(problem_cluster_reports.c.cluster_id)
+        ).all():
+            counts[cid] = n
+    return {
+        rid: ReportClusterRef(id=cid, report_count=counts.get(cid, 0), status=status)
+        for rid, (cid, status) in chosen.items()
+    }
+
+
+def cluster_member_reports(
+    db: Session, cluster_id: uuid.UUID, now: datetime | None = None
+) -> list[AdminReportItem]:
+    """묶음에 묶인 신고 전체 — 접수 순."""
+    now = now or datetime.now(UTC)
+    rows = db.execute(
+        _base()
+        .join(problem_cluster_reports, problem_cluster_reports.c.report_id == Report.id)
+        .where(problem_cluster_reports.c.cluster_id == cluster_id)
+        .order_by(Report.created_at.asc(), Report.display_no.asc())
+    ).all()
+    refs = cluster_refs(db, [r.id for r, _, _ in rows])
+    return [
+        AdminReportItem(**_item_fields(r, c, b, now), cluster=refs.get(r.id)) for r, c, b in rows
+    ]
+
+
+def report_summary(db: Session, now: datetime | None = None) -> ReportSummary:
+    now = now or datetime.now(UTC)
+    by_status = {s.value: 0 for s in ReportStatus}
+    for st, n in db.execute(select(Report.status, func.count()).group_by(Report.status)).all():
+        by_status[st.value] = n
+
+    def count(*conds: ColumnElement[bool]) -> int:
+        return db.scalar(select(func.count()).select_from(Report).where(*conds)) or 0
+
+    return ReportSummary(
+        total=sum(by_status.values()),
+        by_status=by_status,
+        open=sum(by_status[s.value] for s in OPEN_STATUSES),
+        sla_over=count(_sla_filter("초과", now)),
+        sla_soon=count(_sla_filter("임박", now)),
+        urgent_open=count(Report.status.in_(OPEN_STATUSES), Report.priority == Priority.P1),
+    )
 
 
 def list_reports(
@@ -82,6 +156,7 @@ def list_reports(
     category_id: uuid.UUID | None = None,
     priority: Priority | None = None,
     sla_status: SlaStatus | None = None,
+    open_only: bool = False,
     sort: SortKey = "-created_at",
     limit: int = 100,
     offset: int = 0,
@@ -97,6 +172,8 @@ def list_reports(
         conds.append(Report.priority == priority)
     if sla_status is not None:
         conds.append(_sla_filter(sla_status, now))
+    if open_only:
+        conds.append(Report.status.in_(OPEN_STATUSES))
 
     orders: dict[str, list[Any]] = {
         "-created_at": [Report.created_at.desc()],
@@ -109,7 +186,8 @@ def list_reports(
         _base().where(*conds).order_by(*order, Report.display_no.desc()).limit(limit).offset(offset)
     ).all()
     total = db.scalar(select(func.count()).select_from(Report).where(*conds)) or 0
-    items = [AdminReportItem(**_item_fields(r, c, b, now)) for r, c, b in rows]
+    refs = cluster_refs(db, [r.id for r, _, _ in rows])
+    items = [AdminReportItem(**_item_fields(r, c, b, now), cluster=refs.get(r.id)) for r, c, b in rows]
     return AdminReportList(items=items, total=total)
 
 
@@ -135,11 +213,13 @@ def get_report_detail(db: Session, report_id: uuid.UUID, now: datetime | None = 
         )
         for h, a in history_rows
     ]
+    ref = cluster_refs(db, [report.id]).get(report.id)
     return AdminReportDetail(
         **_item_fields(report, category, building, now),
+        cluster=ref,
+        cluster_reports=cluster_member_reports(db, ref.id, now) if ref else [],
         category_id=report.category_id,
         building_id=report.building_id,
-        description=report.description,
         photo_url=report.photo_url,
         assigned_dept=report.assigned_dept,
         updated_at=report.updated_at,

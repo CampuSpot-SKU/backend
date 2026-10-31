@@ -92,7 +92,7 @@ class SlaListIn(BaseModel):
     items: list[SlaItem] = Field(min_length=4, max_length=4)  # P1~P4가 정확히 한 번씩 (서비스에서 검사)
 
 
-# ── 탐지 임계치 ── (객체 하나: threshold_hours 안에 threshold_count건 이상이면 문제 후보)
+# ── 탐지 임계치 ── (객체 하나: threshold_hours 안에 threshold_count건 이상이면 반복 신고로 묶음)
 class DetectionSettings(BaseModel):
     threshold_count: int = Field(ge=2, le=100)
     threshold_hours: int = Field(ge=1, le=8760)

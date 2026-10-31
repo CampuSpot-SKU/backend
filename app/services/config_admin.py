@@ -114,7 +114,7 @@ def save_buildings(db: Session, items: list[BuildingIn]) -> None:
     removed = [b for bid, b in current.items() if bid not in given]
     if in_use := [b.name for b in removed if _in_use(db, b.id)]:
         raise ConfigRuleError(
-            f"신고·문제 후보·예측에 쓰인 건물은 지울 수 없어요: {', '.join(in_use)}"
+            f"신고·반복 신고·예측에 쓰인 건물은 지울 수 없어요: {', '.join(in_use)}"
         )
     for b in removed:
         db.delete(b)

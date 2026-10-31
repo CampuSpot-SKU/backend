@@ -6,6 +6,7 @@
 재오픈해도 sla_deadline은 다시 계산하지 않는다 (원래 마감 기준 — 명세 10-2).
 """
 import uuid
+from datetime import datetime
 
 from sqlalchemy.orm import Session
 
@@ -44,9 +45,15 @@ def check_transition(from_status: ReportStatus, to_status: ReportStatus) -> None
 
 
 def change_status(
-    db: Session, report: Report, to_status: ReportStatus, memo: str | None, admin_id: uuid.UUID | None
+    db: Session,
+    report: Report,
+    to_status: ReportStatus,
+    memo: str | None,
+    admin_id: uuid.UUID | None,
+    changed_at: datetime | None = None,
 ) -> None:
-    """상태 변경 + report_status_history 기록. commit은 호출한 쪽이 한다."""
+    """상태 변경 + report_status_history 기록. commit은 호출한 쪽이 한다.
+    changed_at은 한 트랜잭션에서 여러 단계를 연달아 올릴 때 이력 순서를 구분하려고만 넘긴다(기본은 DB 시각)."""
     check_transition(report.status, to_status)
     db.add(
         ReportStatusHistory(
@@ -55,6 +62,7 @@ def change_status(
             to_status=to_status,
             memo=memo,
             changed_by=admin_id,
+            **({"changed_at": changed_at} if changed_at else {}),
         )
     )
     report.status = to_status

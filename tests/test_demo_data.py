@@ -3,6 +3,7 @@
 시연 화면이 의도대로 나오는지(탐지 후보 6곳, 예측 날짜가 미래, SLA 준수율, 처리 중 신고는 마감 안)를
 계획 데이터만으로 확인한다. 실제 삽입은 임시 DB로 따로 돌려 본다.
 """
+
 import os
 from collections import defaultdict
 from dataclasses import dataclass
@@ -12,13 +13,14 @@ from itertools import pairwise
 import pytest
 
 from app.models.enums import ChatIntent, ChatRole, ReportStatus
+from app.services import campus_places as cp
 from app.services import demo_data
 from app.services.conversation_query import pick_flow
 from app.services.demo_data import DEFAULT_SLA_HOURS, KST, DemoSpec
 from app.services.pii_mask import mask_pii
 from app.services.slot_filling import DONE_PREFIX
 
-NOW = datetime(2026, 10, 31, 18, 0, tzinfo=UTC)  # 2026-11-01 03:00 KST — 시딩한 시각
+NOW = datetime(2026, 10, 31, 20, 0, tzinfo=UTC)  # 2026-11-01 05:00 KST — 시딩한 시각
 OPEN = {ReportStatus.RECEIVED, ReportStatus.ASSIGNED, ReportStatus.IN_PROGRESS}
 
 
@@ -49,7 +51,9 @@ def test_open_reports_are_within_sla() -> None:
     assert len(open_specs) >= 8
     for spec in open_specs:
         deadline = _created(spec) + timedelta(hours=DEFAULT_SLA_HOURS[spec.priority])
-        assert deadline > NOW, f"마감 초과 상태로 시작하면 SLA 배치가 알림을 보냄: {spec.description}"
+        assert deadline > NOW, (
+            f"마감 초과 상태로 시작하면 SLA 배치가 알림을 보냄: {spec.description}"
+        )
 
 
 def test_sla_compliance_is_realistic() -> None:
@@ -97,7 +101,7 @@ def test_predictions_point_to_the_future() -> None:
         if spec.building:
             groups[(spec.building, spec.category)].append(_created(spec))
     predicted = {k: sorted(v) for k, v in groups.items() if len(v) >= 3}
-    assert len(predicted) >= 15
+    assert len(predicted) >= 30
     for key, times in predicted.items():
         gaps = [(b - a).total_seconds() / 86400 for a, b in pairwise(times)]
         avg = sum(gaps) / len(gaps)
@@ -107,20 +111,25 @@ def test_predictions_point_to_the_future() -> None:
 
 def test_scale() -> None:
     plan = demo_data.build_plan()
-    assert 180 <= len(plan) <= 260
+    assert 300 <= len(plan) <= 420
     assert {s.building for s in plan if s.building} == set(demo_data.DEMO_BUILDINGS)
     assert {s.category for s in plan} == set(demo_data.DEPT_BY_CATEGORY)
-    assert {"P1", "P2", "P4"} <= {s.priority for s in plan}  # 실제 AI는 P3를 거의 내지 않는다(영향 낮음·긴급 높음)
+    assert {"P1", "P2", "P4"} <= {
+        s.priority for s in plan
+    }  # 실제 AI는 P3를 거의 내지 않는다(영향 낮음·긴급 높음)
 
 
-def test_duplicate_pairs_exist_but_stay_below_detection() -> None:
-    """같은 날 같은 곳 중복 접수 쌍이 몇 개 있다(2건) — 탐지 후보는 아니다."""
+def test_near_simultaneous_duplicates_exist() -> None:
+    """같은 날 같은 곳에서 비슷한 시간에 다시 들어온 중복 접수가 여럿 있다 — 탐지 후보(72시간 3건)는 따로 6곳뿐이다."""
     groups: dict[tuple[str, str | None, str], list[datetime]] = defaultdict(list)
     for spec in demo_data.build_plan():
         if spec.building and spec.detail:
             groups[(spec.building, spec.detail, spec.category)].append(_created(spec))
-    pairs = [k for k, v in groups.items() if len(v) == 2 and abs(v[0] - v[1]) <= timedelta(days=1)]
-    assert len(pairs) >= 10
+    dup = 0
+    for times in groups.values():
+        times.sort()
+        dup += any(b - a <= timedelta(hours=3) for a, b in pairwise(times))
+    assert dup >= 10
 
 
 def test_mine_descriptions_exist_once_in_plan() -> None:
@@ -196,6 +205,17 @@ def test_every_report_has_a_dialogue_that_the_admin_viewer_can_pick() -> None:
         assert times[0] < created - timedelta(seconds=8)
 
 
+def test_building_is_always_said_by_the_student() -> None:
+    """학생이 건물을 한 번도 말하지 않았는데 접수에 건물이 들어가면 안 된다 — 안 말했으면 챗봇이 되물어야 한다."""
+    for i, spec in enumerate(demo_data.build_plan(), start=1):
+        if spec.building is None:
+            continue
+        dialogue = demo_data.build_dialogue(spec, i, _created(spec))
+        said = " ".join(m.content for m in dialogue if m.role is ChatRole.USER)
+        unique = cp.find_unique(said)
+        assert spec.building in said or (unique and unique[0] == spec.building), spec.description
+
+
 def test_dialogues_have_variety_and_clarifying_questions() -> None:
     plan = demo_data.build_plan()
     dialogues = [demo_data.build_dialogue(s, i, _created(s)) for i, s in enumerate(plan, start=1)]
@@ -245,7 +265,9 @@ def test_insert_plan_and_purge_chat_on_real_db() -> None:
         assert demo_data.count_demo(db) == len(plan)
 
         # 관리자 신고 대화 열람이 실제로 대화를 돌려준다 (마지막 = 접수 완료 안내)
-        report = db.scalars(select(Report).join(ChatSession, Report.session_id == ChatSession.id)).first()
+        report = db.scalars(
+            select(Report).join(ChatSession, Report.session_id == ChatSession.id)
+        ).first()
         assert report is not None
         conv = get_report_conversation(db, report.id)
         assert conv is not None and len(conv.messages) >= 4
@@ -261,7 +283,9 @@ def test_insert_plan_and_purge_chat_on_real_db() -> None:
         db.add(student)
         db.flush()
         assert demo_data.attach_demo_to_user(db, "seedtest-stu") == 8
-        assert demo_data.attach_demo_to_user(db, "seedtest-stu") == 0  # 이미 연결된 건 다시 안 건드림
+        assert (
+            demo_data.attach_demo_to_user(db, "seedtest-stu") == 0
+        )  # 이미 연결된 건 다시 안 건드림
         db.commit()
         mine = list_my_sessions(db, student.id, limit=20, offset=0)
         assert len(mine.items) == 8
@@ -270,7 +294,14 @@ def test_insert_plan_and_purge_chat_on_real_db() -> None:
         stray = ChatSession(user_identifier="stray-test-session")
         db.add(stray)
         db.flush()
-        db.add(ChatMessage(session_id=stray.id, role=ChatRole.USER, content="테스트 문의", intent=ChatIntent.INQUIRY))
+        db.add(
+            ChatMessage(
+                session_id=stray.id,
+                role=ChatRole.USER,
+                content="테스트 문의",
+                intent=ChatIntent.INQUIRY,
+            )
+        )
         db.commit()
         sessions, messages = demo_data.count_orphan_chat(db)
         assert sessions >= 1 and messages >= 1

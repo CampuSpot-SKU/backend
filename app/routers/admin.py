@@ -18,6 +18,7 @@ from app.schemas.admin import (
     AdminReportList,
     LoginIn,
     ReportConversation,
+    ReportSummary,
     SimilarReportList,
     SlaStatus,
     SortKey,
@@ -33,7 +34,7 @@ from app.services.auth import (
 from app.services.conversation_query import get_report_conversation
 from app.services.login_guard import RETRY_AFTER_SECONDS, is_blocked, record_failure
 from app.services.photo_storage import PhotoStorage, get_photo_storage
-from app.services.report_query import get_report_detail, list_reports
+from app.services.report_query import get_report_detail, list_reports, report_summary
 from app.services.report_workflow import InvalidTransitionError, change_status
 from app.services.similar_query import find_similar
 
@@ -83,6 +84,7 @@ def get_reports(
     category_id: uuid.UUID | None = None,
     priority: Priority | None = None,
     sla_status: SlaStatus | None = None,
+    open_only: bool = False,
     sort: SortKey = "-created_at",
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -94,10 +96,17 @@ def get_reports(
         category_id=category_id,
         priority=priority,
         sla_status=sla_status,
+        open_only=open_only,
         sort=sort,
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/reports/summary", response_model=ReportSummary, responses=_AUTH_ERRORS)
+def get_reports_summary(db: DbSession, _admin: CurrentAdmin) -> ReportSummary:
+    """목록 위 숫자 띠 — 상태별 건수, 처리 중, SLA 초과·임박, 처리 중인 긴급(P1). 전체 신고 기준."""
+    return report_summary(db)
 
 
 @router.get(

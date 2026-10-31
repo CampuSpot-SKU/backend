@@ -32,6 +32,14 @@ class NamedRef(BaseModel):
     name: str
 
 
+class ReportClusterRef(BaseModel):
+    """이 신고가 묶인 반복 신고(기각된 묶음 제외) — 목록에서 같은 건끼리 모아 보여주는 데 씀."""
+
+    id: uuid.UUID
+    report_count: int  # 그 묶음에 묶인 신고 전체 수
+    status: ClusterStatus
+
+
 class AdminReportItem(BaseModel):
     """접수 목록(큐) 한 줄."""
 
@@ -47,6 +55,8 @@ class AdminReportItem(BaseModel):
     sla_deadline: datetime | None
     sla_status: SlaStatus | None
     created_at: datetime
+    description: str
+    cluster: ReportClusterRef | None = None
 
 
 class AdminReportList(BaseModel):
@@ -67,11 +77,22 @@ class AdminReportDetail(AdminReportItem):
 
     category_id: uuid.UUID
     building_id: uuid.UUID | None
-    description: str
     photo_url: str | None
     assigned_dept: str | None
     updated_at: datetime
     status_history: list[StatusHistoryItem]
+    cluster_reports: list[AdminReportItem] = []  # 같은 묶음의 신고 전체(자기 자신 포함), 접수 순
+
+
+class ReportSummary(BaseModel):
+    """목록 위 숫자 띠 — 전체 신고 기준 (목록 limit과 무관)."""
+
+    total: int
+    by_status: dict[str, int]  # 접수·배정·처리중·해결·종료 모두 키로 존재
+    open: int  # 접수+배정+처리중
+    sla_over: int
+    sla_soon: int
+    urgent_open: int  # 처리 중인 P1
 
 
 class SimilarReport(BaseModel):
@@ -123,19 +144,37 @@ class StatusChangeIn(BaseModel):
 
 
 class ProblemClusterItem(BaseModel):
-    """문제 후보 한 건 — 목록 원소이자 PATCH 응답 (같은 모양)."""
+    """반복 신고 묶음 한 건 — 목록 원소이자 PATCH 응답 (같은 모양)."""
 
     id: uuid.UUID
     building: NamedRef | None  # 건물 없이 묶인 후보면 null
     detail: str | None
     category: NamedRef
-    report_count: int  # 이 후보에 묶인 신고 수 (problem_cluster_reports)
+    report_count: int  # 이 묶음에 묶인 신고 수 (problem_cluster_reports)
+    open_count: int  # 그중 아직 해결 전(접수·배정·처리중)인 신고 수
+    first_reported_at: datetime | None
+    last_reported_at: datetime | None
     detected_at: datetime
     status: ClusterStatus
 
 
 class ProblemClusterList(BaseModel):
     items: list[ProblemClusterItem]
+
+
+class ProblemClusterDetail(ProblemClusterItem):
+    """묶음 한 건 + 묶인 신고 전체 (접수 순)."""
+
+    reports: list[AdminReportItem]
+
+
+class ClusterAdvanceIn(BaseModel):
+    to_status: Literal["배정", "처리중", "해결"]
+    memo: str | None = Field(default=None, max_length=1000)
+
+
+class ClusterAdvanceOut(ProblemClusterDetail):
+    changed_count: int  # 상태가 실제로 바뀐 신고 수
 
 
 class ClusterStatusChangeIn(BaseModel):
@@ -151,6 +190,7 @@ class PredictionItem(BaseModel):
     category: NamedRef
     avg_recurrence_days: float
     predicted_next_at: datetime
+    last_occurred_at: datetime | None = None
 
 
 class PredictionList(BaseModel):

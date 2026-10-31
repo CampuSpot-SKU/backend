@@ -109,7 +109,7 @@ def put_sla(body: SlaListIn, db: DbSession, admin: CurrentAdmin) -> SlaList:
 
 @router.get("/detection", response_model=DetectionSettings, responses=_ERRORS)
 def get_detection(db: DbSession, _admin: CurrentAdmin) -> DetectionSettings:
-    """탐지 임계치 — threshold_hours 시간 안에 같은 곳 신고가 threshold_count건 이상이면 문제 후보."""
+    """탐지 임계치 — threshold_hours 시간 안에 같은 곳 신고가 threshold_count건 이상이면 반복 신고로 묶음."""
     return svc.get_detection(db)
 
 

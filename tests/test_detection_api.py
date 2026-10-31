@@ -1,4 +1,4 @@
-"""탐지·예측 관리자 API 통합테스트 — 문제 후보 목록·승격/기각, 재발 예측 목록 (작업 1-8).
+"""탐지·예측 관리자 API 통합테스트 — 반복 신고 묶음 목록·승격/기각·일괄 처리, 재발 예측 목록 (작업 1-8).
 
 TEST_DATABASE_URL(마이그레이션 끝난 테스트용 빈 DB)이 있을 때만 실행 — 운영 DB 금지!
 배치(ai)가 채울 problem_clusters·prediction_stats 행은 테스트가 직접 넣는다.
@@ -116,7 +116,11 @@ def test_cluster_list_shape_filter_and_order(client: TestClient, headers: dict[s
 
     by_id = {i["id"]: i for i in items}
     o = by_id[str(older)]
-    assert set(o) == {"id", "building", "detail", "category", "report_count", "detected_at", "status"}
+    assert set(o) == {
+        "id", "building", "detail", "category", "report_count", "open_count",
+        "first_reported_at", "last_reported_at", "detected_at", "status",
+    }
+    assert o["open_count"] == 3
     assert o["building"] == {"id": str(building.id), "name": building.name}
     assert o["category"] == {"id": str(category.id), "name": "시설·설비"}
     assert o["detail"] == "2층 화장실" and o["report_count"] == 3
@@ -162,6 +166,79 @@ def test_cluster_patch_bad_input(client: TestClient, headers: dict[str, str]) ->
     assert client.patch(f"{BASE}/problem-clusters/not-a-uuid", json={"status": "승격"}, headers=headers).status_code == 422
 
 
+def test_cluster_detail_lists_member_reports(client: TestClient, headers: dict[str, str]) -> None:
+    c = make_cluster(detected_ago_h=1, n_reports=3)
+    res = client.get(f"{BASE}/problem-clusters/{c}", headers=headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["id"] == str(c) and len(body["reports"]) == 3
+    assert all(r["description"] == "테스트 신고(탐지)" for r in body["reports"])
+    assert all(r["cluster"] == {"id": str(c), "report_count": 3, "status": "후보"} for r in body["reports"])
+    times = [r["created_at"] for r in body["reports"]]
+    assert times == sorted(times)  # 접수 순
+    assert client.get(f"{BASE}/problem-clusters/{uuid.uuid4()}", headers=headers).status_code == 404
+
+    # 신고 상세에서도 같은 묶음의 신고가 같이 내려옴
+    one = client.get(f"{BASE}/reports/{body['reports'][0]['id']}", headers=headers).json()
+    assert one["cluster"]["id"] == str(c)
+    assert {r["id"] for r in one["cluster_reports"]} == {r["id"] for r in body["reports"]}
+
+
+def test_cluster_advance_moves_reports_forward_only(client: TestClient, headers: dict[str, str]) -> None:
+    c = make_cluster(detected_ago_h=1, n_reports=3)
+    members = client.get(f"{BASE}/problem-clusters/{c}", headers=headers).json()["reports"]
+    # 하나는 먼저 처리중까지 올려 둔다
+    first = members[0]["id"]
+    for to in ("배정", "처리중"):
+        assert client.patch(f"{BASE}/reports/{first}/status", json={"to_status": to}, headers=headers).status_code == 200
+
+    res = client.post(f"{BASE}/problem-clusters/{c}/advance", json={"to_status": "처리중", "memo": "한 번에"}, headers=headers)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["changed_count"] == 2  # 이미 처리중인 하나는 그대로
+    assert {r["status"] for r in body["reports"]} == {"처리중"}
+    assert body["open_count"] == 3
+
+    res = client.post(f"{BASE}/problem-clusters/{c}/advance", json={"to_status": "해결"}, headers=headers)
+    assert res.json()["changed_count"] == 3 and res.json()["open_count"] == 0
+    # 다시 같은 단계로 보내도 바뀌는 건 없음
+    assert client.post(f"{BASE}/problem-clusters/{c}/advance", json={"to_status": "해결"}, headers=headers).json()["changed_count"] == 0
+    # 중간 단계 이력이 남음
+    detail = client.get(f"{BASE}/reports/{members[1]['id']}", headers=headers).json()
+    assert [h["to_status"] for h in detail["status_history"]][-3:] == ["배정", "처리중", "해결"]
+
+
+def test_cluster_advance_rejects_bad_requests(client: TestClient, headers: dict[str, str]) -> None:
+    rejected = make_cluster(detected_ago_h=1, n_reports=3, status=ClusterStatus.REJECTED)
+    assert client.post(f"{BASE}/problem-clusters/{rejected}/advance", json={"to_status": "배정"}, headers=headers).status_code == 409
+    c = make_cluster(detected_ago_h=1, n_reports=3)
+    assert client.post(f"{BASE}/problem-clusters/{c}/advance", json={"to_status": "종료"}, headers=headers).status_code == 422
+    assert client.post(f"{BASE}/problem-clusters/{uuid.uuid4()}/advance", json={"to_status": "배정"}, headers=headers).status_code == 404
+    assert client.post(f"{BASE}/problem-clusters/{c}/advance", json={"to_status": "배정"}).status_code == 401
+
+
+def test_rejected_cluster_is_not_shown_on_reports(client: TestClient, headers: dict[str, str]) -> None:
+    c = make_cluster(detected_ago_h=1, n_reports=3, status=ClusterStatus.REJECTED)
+    rid = client.get(f"{BASE}/problem-clusters/{c}", headers=headers).json()["reports"][0]["id"]
+    one = client.get(f"{BASE}/reports/{rid}", headers=headers).json()
+    assert one["cluster"] is None and one["cluster_reports"] == []
+
+
+def test_reports_summary_and_open_only(client: TestClient, headers: dict[str, str]) -> None:
+    make_cluster(detected_ago_h=1, n_reports=2)
+    res = client.get(f"{BASE}/reports/summary", headers=headers)
+    assert res.status_code == 200
+    s = res.json()
+    assert set(s["by_status"]) == {"접수", "배정", "처리중", "해결", "종료"}
+    assert s["total"] == sum(s["by_status"].values())
+    assert s["open"] == s["by_status"]["접수"] + s["by_status"]["배정"] + s["by_status"]["처리중"]
+    assert s["urgent_open"] >= 0 and s["sla_over"] >= 0 and s["sla_soon"] >= 0
+    assert client.get(f"{BASE}/reports/summary").status_code == 401
+    listed = client.get(f"{BASE}/reports", params={"open_only": "true", "limit": 200}, headers=headers).json()
+    assert all(i["status"] in ("접수", "배정", "처리중") for i in listed["items"])
+    assert listed["total"] == s["open"]
+
+
 def test_predictions_only_computed_rows_sorted(client: TestClient, headers: dict[str, str]) -> None:
     building, category = _refs()
     now = datetime.now(UTC)
@@ -184,7 +261,9 @@ def test_predictions_only_computed_rows_sorted(client: TestClient, headers: dict
     items = res.json()["items"]
     assert all(i["detail"] != f"계산 전-{tag}" for i in items)  # 평균·예상 시점 없는 행은 안 나옴
     for i in items:
-        assert set(i) == {"building", "detail", "category", "avg_recurrence_days", "predicted_next_at"}
+        assert set(i) == {
+            "building", "detail", "category", "avg_recurrence_days", "predicted_next_at", "last_occurred_at",
+        }
         assert i["avg_recurrence_days"] is not None and i["predicted_next_at"] is not None
     times = [datetime.fromisoformat(i["predicted_next_at"]) for i in items]
     assert times == sorted(times)  # 예상 시점 빠른 순

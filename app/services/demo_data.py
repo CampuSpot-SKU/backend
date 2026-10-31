@@ -13,9 +13,11 @@
   문의 로그는 가짜로 만들지 않는다(학칙 인용이 틀리면 안 되므로 촬영 전 사이트에서 실제 질문).
 - 하는 일은 scripts/seed_demo_data.py(Actions "Seed demo data")가 호출한다. 형식·시나리오는 맨 아래 build_plan.
 """
+
 from __future__ import annotations
 
 import random
+import uuid
 import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -33,13 +35,36 @@ from app.models.enums import ChatIntent, ChatRole, Priority, ReportStatus
 from app.models.problem import PredictionStat
 from app.models.report import Report, ReportStatusHistory
 from app.models.user import User
-from app.services.slot_filling import DONE_PREFIX
+from app.services import campus_places as cp
+from app.services.slot_filling import (
+    ASK_BUILDING_ONLY,
+    ASK_LOCATION_BUILDING_WIDE,
+    ASK_LOCATION_GENERIC,
+    DONE_PREFIX,
+)
 
 DEMO_IDENTIFIER = "demo-seed"
 KST = timezone(timedelta(hours=9))
-SPREAD_FROM_DAYS = 5.0  # 이보다 오래된 신고만 접수 시각을 흩뿌린다(최근 신고·몰림 시나리오는 "지금 − N일" 그대로)
+SPREAD_FROM_DAYS = (
+    5.0  # 이보다 오래된 신고만 접수 시각을 흩뿌린다(최근 신고·몰림 시나리오는 "지금 − N일" 그대로)
+)
 # 학생이 신고하는 시간대(KST) 가중치 — 수업 시간 사이 오전~오후에 몰리고 밤엔 드묾
-HOUR_WEIGHTS = {8: 3, 9: 6, 10: 9, 11: 10, 12: 8, 13: 8, 14: 9, 15: 9, 16: 8, 17: 6, 18: 5, 19: 3, 20: 3, 21: 2}
+HOUR_WEIGHTS = {
+    8: 3,
+    9: 6,
+    10: 9,
+    11: 10,
+    12: 8,
+    13: 8,
+    14: 9,
+    15: 9,
+    16: 8,
+    17: 6,
+    18: 5,
+    19: 3,
+    20: 3,
+    21: 2,
+}
 DEFAULT_SLA_HOURS = {"P1": 4, "P2": 24, "P3": 72, "P4": 168}
 
 # 카테고리별 담당 부서 이름(시연용 가상 이름 — 실제 학교 부서명이 아님)
@@ -58,8 +83,18 @@ CLOSE_AFTER_RESOLVE_H = 20.0  # 해결 → 종료
 MARGIN = timedelta(minutes=5)  # 미래 시각이 되지 않게 남기는 여유
 
 DEMO_BUILDINGS = (
-    "대일관", "문예관", "본관", "북악관", "상승관", "유담관",
-    "은주1관", "은주2관", "청운관", "한림관", "혜인관", "수인관",
+    "대일관",
+    "문예관",
+    "본관",
+    "북악관",
+    "상승관",
+    "유담관",
+    "은주1관",
+    "은주2관",
+    "청운관",
+    "한림관",
+    "혜인관",
+    "수인관",
 )  # 시연 데이터가 빠짐없이 쓰는 건물(12곳)
 
 ORDER = [
@@ -74,7 +109,9 @@ ORDER = [
 @dataclass(frozen=True)
 class DemoSpec:
     days_ago: float  # 접수 시점 (실행 시각 기준 며칠 전)
-    building: str | None  # 학교 건물 목록에서 못 찾은 위치면 None (location_raw에 학생이 말한 그대로)
+    building: (
+        str | None
+    )  # 학교 건물 목록에서 못 찾은 위치면 None (location_raw에 학생이 말한 그대로)
     floor: str | None
     detail: str | None
     category: str
@@ -83,7 +120,9 @@ class DemoSpec:
     target: ReportStatus  # 이 단계까지 진행된 상태로 만든다(시각이 미래가 되면 앞 단계에서 멈춤)
     resolve_hours: float | None = None  # 접수 후 해결까지 걸린 시간 (target이 해결·종료일 때)
     memo: str | None = None  # 해결 처리 메모
-    clock: str | None = None  # 있으면 days_ago는 "N일 전(KST 날짜)", clock은 그날의 접수 시각 "HH:MM"
+    clock: str | None = (
+        None  # 있으면 days_ago는 "N일 전(KST 날짜)", clock은 그날의 접수 시각 "HH:MM"
+    )
     reason: str | None = None  # 접수 완료 안내에 쓰는 AI 판단 이유(없으면 우선순위별 기본 문장)
     location_raw: str | None = None  # 건물을 못 찾은 신고의 위치 원문
 
@@ -116,31 +155,65 @@ def build_plan() -> list[DemoSpec]:
 
     status = {"R": R, "A": A, "P": P}
     plan: list[DemoSpec] = []
-    for day, clock, building, floor, detail, category, priority, description, hours, memo, code, reason, raw in PLAN_ROWS:
+    for (
+        day,
+        clock,
+        building,
+        floor,
+        detail,
+        category,
+        priority,
+        description,
+        hours,
+        memo,
+        code,
+        reason,
+        raw,
+    ) in PLAN_ROWS:
         target = status[code] if code else ReportStatus.CLOSED
         plan.append(
-            DemoSpec(float(day), building, floor, detail, category, priority, description, target, hours, memo, clock, reason, raw)
+            DemoSpec(
+                float(day),
+                building,
+                floor,
+                detail,
+                category,
+                priority,
+                description,
+                target,
+                hours,
+                memo,
+                clock,
+                reason,
+                raw,
+            )
         )
     return plan
 
 
 def _rng(spec: DemoSpec, salt: str) -> random.Random:
     """신고마다 항상 같은 값이 나오는 난수 — 같은 시점에 다시 넣어도 같은 데이터, 테스트도 안정적."""
-    return random.Random(zlib.crc32(f"{salt}|{spec.building}|{spec.floor}|{spec.description}".encode()))
+    return random.Random(
+        zlib.crc32(f"{salt}|{spec.building}|{spec.floor}|{spec.description}".encode())
+    )
 
 
 def created_at_for(spec: DemoSpec, now: datetime) -> datetime:
     """접수 시각. clock이 있으면 "오늘(KST) − N일"의 그 시각. 없으면 now − days_ago이고, 5일 넘은 신고는 시·분·초를 학생 활동 시간대로 정한다."""
     if spec.clock:
         hh, mm = (int(x) for x in spec.clock.split(":"))
-        day = (now.astimezone(KST) - timedelta(days=int(spec.days_ago))).replace(hour=hh, minute=mm, second=_rng(spec, "sec").randrange(60), microsecond=0)
+        day = (now.astimezone(KST) - timedelta(days=int(spec.days_ago))).replace(
+            hour=hh, minute=mm, second=_rng(spec, "sec").randrange(60), microsecond=0
+        )
         return day.astimezone(now.tzinfo or UTC)
     base = now - timedelta(days=spec.days_ago)
     if spec.days_ago < SPREAD_FROM_DAYS:
         return base
     rng = _rng(spec, "time")
     hour = rng.choices(list(HOUR_WEIGHTS), weights=list(HOUR_WEIGHTS.values()))[0]
-    local = base.astimezone(KST).replace(hour=hour, minute=rng.randrange(60), second=rng.randrange(60), microsecond=0)
+    local = base.astimezone(KST).replace(
+        hour=hour, minute=rng.randrange(60), second=rng.randrange(60), microsecond=0
+    )
     return local.astimezone(base.tzinfo or UTC)
 
 
@@ -203,7 +276,13 @@ REASON_BY_PRIORITY = {
 }
 _PREFIXES = ["", "", "저기 ", "혹시 ", "안녕하세요 "]
 _SUFFIXES = ["", "", "", "ㅠㅠ", " 확인 부탁드려요", "...", " 빨리 와주세요"]
-_CONFIRMS = ["네 접수해 주세요", "네", "네 그렇게 접수해주세요", "넵 접수해주세요", "네 맞아요 접수할게요"]
+_CONFIRMS = [
+    "네 접수해 주세요",
+    "네",
+    "네 그렇게 접수해주세요",
+    "넵 접수해주세요",
+    "네 맞아요 접수할게요",
+]
 
 
 @dataclass(frozen=True)
@@ -216,12 +295,18 @@ class DemoMessage:
 
 
 def location_text(spec: DemoSpec) -> str:
-    """"혜인관 2층 화장실"처럼 접수 완료 안내에 쓰는 위치."""
+    """ "혜인관 2층 화장실"처럼 접수 완료 안내에 쓰는 위치."""
     if spec.building is None:
         return spec.location_raw or "위치 미상"
     parts = [spec.building]
     if spec.floor:
-        parts.append(f"{spec.floor}층" if spec.floor.isdigit() else f"지하 {spec.floor[1:]}층" if spec.floor.startswith("B") else spec.floor)
+        parts.append(
+            f"{spec.floor}층"
+            if spec.floor.isdigit()
+            else f"지하 {spec.floor[1:]}층"
+            if spec.floor.startswith("B")
+            else spec.floor
+        )
     if spec.detail:
         parts.append(spec.detail)
     return " ".join(parts)
@@ -240,27 +325,70 @@ def build_dialogue(spec: DemoSpec, display_no: int, created: datetime) -> list[D
     floor_in = floor.isdigit() and f"{floor}층" in desc
     is_toilet = "화장실" in (spec.detail or "")
     roll = rng.random()
-    if floor_in and roll < 0.35:  # 층을 빼고 말한 경우 → 층(화장실이면 남/여까지 한 번에) 되묻기
+    summary = desc
+    unique = cp.find_unique(desc)
+    # 학생이 건물을 말하지 않았고 이름만으로 건물이 정해지는 장소도 아니면, 실제 챗봇처럼 건물을 되묻는다
+    needs_building = (
+        spec.building is not None
+        and spec.building not in desc
+        and not (unique and unique[0] == spec.building)
+    )
+    if needs_building:
+        building = cast(str, spec.building)
+        generic = spec.detail or "장소"
+        if generic == "엘리베이터":
+            asks.append((ASK_LOCATION_BUILDING_WIDE.format(detail=generic), f"{building}이에요"))
+        elif floor_in:
+            asks.append((ASK_BUILDING_ONLY, f"{building}이요"))
+        elif floor.isdigit() and not unique:
+            asks.append(
+                (ASK_LOCATION_GENERIC.format(detail=generic), f"{building} {floor}층이에요")
+            )
+        else:
+            asks.append((ASK_BUILDING_ONLY, f"{building}이에요"))
+        summary = f"{building} {desc}"
+    elif (
+        floor_in and roll < 0.35 and spec.building and spec.building in desc
+    ):  # 층을 빼고 말한 경우 → 층(화장실이면 남/여까지 한 번에) 되묻기
         first = " ".join(desc.replace(f"{floor}층", "", 1).split())
         if is_toilet:
             gender = rng.choice(["남자", "여자"])
-            asks.append((f"{spec.building} 몇 층 남자/여자 화장실인가요?", f"{floor}층 {gender} 화장실이에요"))
+            asks.append(
+                (
+                    f"{spec.building} 몇 층 남자/여자 화장실인가요?",
+                    f"{floor}층 {gender} 화장실이에요",
+                )
+            )
         else:
             asks.append((f"{spec.building} 몇 층인가요?", f"{floor}층이요"))
-    elif spec.building and spec.building in desc and roll > 0.88:  # 건물을 빼고 말한 경우 → 건물 되묻기
+    elif (
+        spec.building and spec.building in desc and roll > 0.88
+    ):  # 건물을 빼고 말한 경우 → 건물 되묻기
         first = " ".join(desc.replace(spec.building, "", 1).split())
-        asks.append(("어느 건물인가요?", f"{spec.building}이에요"))
+        asks.append((ASK_BUILDING_ONLY, f"{spec.building}이에요"))
     first = rng.choice(_PREFIXES) + first + rng.choice(_SUFFIXES)
 
     score = rng.randint(88, 99)
     seq: list[tuple[ChatRole, str, ChatIntent | None, float, dict[str, Any] | None]] = [
-        (ChatRole.USER, first, ChatIntent.REPORT, 0.0, {"report_score": score, "inquiry_score": 100 - score}),
+        (
+            ChatRole.USER,
+            first,
+            ChatIntent.REPORT,
+            0.0,
+            {"report_score": score, "inquiry_score": 100 - score},
+        ),
     ]
     for question, answer in asks:
         seq.append((ChatRole.ASSISTANT, question, ChatIntent.REPORT, rng.uniform(2.5, 5.0), None))
         seq.append((ChatRole.USER, answer, ChatIntent.REPORT, rng.uniform(12, 40), None))
     seq.append(
-        (ChatRole.ASSISTANT, f"“{desc}” 내용으로 정리했어요. 이대로 접수할까요?", ChatIntent.REPORT, rng.uniform(2.5, 5.0), None)
+        (
+            ChatRole.ASSISTANT,
+            f"“{summary}” 내용으로 정리했어요. 이대로 접수할까요?",
+            ChatIntent.REPORT,
+            rng.uniform(2.5, 5.0),
+            None,
+        )
     )
     seq.append((ChatRole.USER, rng.choice(_CONFIRMS), ChatIntent.REPORT, rng.uniform(6, 25), None))
     done = (
@@ -329,7 +457,9 @@ def _delete_empty_clusters(db: Session) -> None:
 def reset_demo(db: Session) -> int:
     """데모 신고와 데모 세션을 지운다. 예측 통계(파생 데이터)와 빈 문제 후보도 정리. 지운 신고 수를 돌려준다."""
     demo_sessions = select(ChatSession.id).where(ChatSession.user_identifier == DEMO_IDENTIFIER)
-    result = cast("CursorResult[Any]", db.execute(delete(Report).where(Report.session_id.in_(demo_sessions))))
+    result = cast(
+        "CursorResult[Any]", db.execute(delete(Report).where(Report.session_id.in_(demo_sessions)))
+    )
     db.execute(delete(ChatSession).where(ChatSession.user_identifier == DEMO_IDENTIFIER))
     _clear_derived(db)
     return int(result.rowcount or 0)
@@ -341,7 +471,9 @@ def purge_non_demo(db: Session) -> int:
     result = cast(
         "CursorResult[Any]",
         db.execute(
-            delete(Report).where(Report.session_id.is_(None) | Report.session_id.not_in(demo_sessions))
+            delete(Report).where(
+                Report.session_id.is_(None) | Report.session_id.not_in(demo_sessions)
+            )
         ),
     )
     _clear_derived(db)
@@ -380,7 +512,9 @@ def purge_orphan_chat(db: Session) -> int:
     신고가 붙은 세션과 로그인 계정에 연결된 세션은 남긴다. purge_non_demo(테스트 신고 삭제) 뒤에 부르면 신고가 없어져
     그 신고의 세션도 지워진다. 지금 사이트를 쓰는 사람의 대화도 지워지니 촬영 직전 한 번만 쓸 것.
     """
-    result = cast("CursorResult[Any]", db.execute(delete(ChatSession).where(*_orphan_chat_filter())))
+    result = cast(
+        "CursorResult[Any]", db.execute(delete(ChatSession).where(*_orphan_chat_filter()))
+    )
     return int(result.rowcount or 0)
 
 
@@ -394,7 +528,7 @@ MINE_DESCRIPTIONS = (
     "한림관 식당 주방 쪽에서 가스 냄새가 나요",
     "청운관 화장실 청소 좀 해주세요 쓰레기가 넘쳐요",
     "북악관 3층 정수기 온수가 안 나와요",
-    "혜인관 1층 쓰레기통이 꽉 찼어요",
+    "문예관 605호 강의실 제 자리 스탠드가 안 켜져요",
 )
 
 
@@ -447,6 +581,11 @@ def insert_plan(db: Session, specs: Sequence[DemoSpec], now: datetime) -> Counts
     sla_hours = {s.priority.value: s.sla_hours for s in db.scalars(select(SlaConfig))}
     admins = list(db.scalars(select(Admin.id).order_by(Admin.login_id)))
 
+    reserved = set(db.scalars(select(Report.display_no)))  # 데모가 아닌 신고가 쓰는 번호는 건너뛴다
+    next_no = 1
+    sessions: list[ChatSession] = []
+    reports: list[Report] = []
+    children: list[ChatMessage | ReportStatusHistory] = []
     open_n = done_n = met = breached = message_n = 0
     for i, spec in enumerate(specs):
         if spec.category not in categories:
@@ -455,12 +594,23 @@ def insert_plan(db: Session, specs: Sequence[DemoSpec], now: datetime) -> Counts
             raise ValueError(f"건물 '{spec.building}'이(가) 없어요 (설정 > 건물 확인)")
         steps = timeline(spec, now)
         created = steps[0].at
-        deadline = created + timedelta(hours=sla_hours.get(spec.priority, DEFAULT_SLA_HOURS[spec.priority]))
+        deadline = created + timedelta(
+            hours=sla_hours.get(spec.priority, DEFAULT_SLA_HOURS[spec.priority])
+        )
         last = steps[-1]
-        session = ChatSession(user_identifier=DEMO_IDENTIFIER, started_at=created - timedelta(minutes=3))
-        db.add(session)
-        db.flush()
+        while next_no in reserved:
+            next_no += 1
+        display_no = next_no
+        next_no += 1
+        session = ChatSession(
+            id=uuid.uuid4(),
+            user_identifier=DEMO_IDENTIFIER,
+            started_at=created - timedelta(minutes=3),
+        )
+        sessions.append(session)
         report = Report(
+            id=uuid.uuid4(),
+            display_no=display_no,
             session_id=session.id,
             category_id=categories[spec.category],
             priority=Priority(spec.priority),
@@ -476,13 +626,13 @@ def insert_plan(db: Session, specs: Sequence[DemoSpec], now: datetime) -> Counts
             created_at=created,
             updated_at=last.at,
         )
-        db.add(report)
-        db.flush()  # display_no가 정해져야 접수 완료 안내 문구에 번호를 쓸 수 있음
-        dialogue = build_dialogue(spec, report.display_no, created)
+        reports.append(report)
+        dialogue = build_dialogue(spec, display_no, created)
         session.started_at = dialogue[0].at - timedelta(seconds=20)
         for m in dialogue:
-            db.add(
+            children.append(
                 ChatMessage(
+                    id=uuid.uuid4(),
                     session_id=session.id,
                     role=m.role,
                     content=m.content,
@@ -493,8 +643,9 @@ def insert_plan(db: Session, specs: Sequence[DemoSpec], now: datetime) -> Counts
             )
         message_n += len(dialogue)
         for j, step in enumerate(steps):
-            db.add(
+            children.append(
                 ReportStatusHistory(
+                    id=uuid.uuid4(),
                     report_id=report.id,
                     from_status=steps[j - 1].status if j else None,
                     to_status=step.status,
@@ -512,6 +663,14 @@ def insert_plan(db: Session, specs: Sequence[DemoSpec], now: datetime) -> Counts
                 met += 1
             else:
                 breached += 1
-    return Counts(len(specs), open_n, done_n, met, breached, sessions=len(specs), messages=message_n)
-
-
+    # 표 단위로 한 번씩 보낸다 — 원격 DB에서 신고마다 왕복하면 몇 분이 걸린다 (세션 → 신고 → 메시지·이력 순)
+    for batch in (sessions, reports, children):
+        db.add_all(batch)
+        db.flush()
+    db.execute(
+        text("SELECT setval(pg_get_serial_sequence('reports', 'display_no'), :v, false)"),
+        {"v": max(next_no, max(reserved, default=0) + 1)},
+    )
+    return Counts(
+        len(specs), open_n, done_n, met, breached, sessions=len(specs), messages=message_n
+    )
