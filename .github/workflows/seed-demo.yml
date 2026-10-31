@@ -25,6 +25,11 @@ on:
         type: boolean
         default: false
 
+      add_outage_demo:
+        description: "건물 전체 정전 시연 신고 8건을 기존 데이터에 추가 (지우는 것 없음) — mode가 apply일 때만 저장"
+        type: boolean
+        default: false
+
 concurrency:
   group: seed-demo-data
   cancel-in-progress: false
@@ -51,8 +56,15 @@ jobs:
           MODE: ${{ inputs.mode }}
           PURGE_TEST: ${{ inputs.purge_test }}
           PURGE_CHAT: ${{ inputs.purge_chat }}
+          ADD_OUTAGE: ${{ inputs.add_outage_demo }}
         run: |
           set -o pipefail
+          if [ "$ADD_OUTAGE" = "true" ]; then
+            flags="--add-outage-demo"
+            if [ "$MODE" = "apply" ]; then flags="$flags --apply"; fi
+            python scripts/seed_demo_data.py $flags | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           flags=""
           if [ "$MODE" = "apply" ]; then flags="--apply"; fi
           if [ "$MODE" = "reset" ]; then flags="--apply --reset-only"; fi
