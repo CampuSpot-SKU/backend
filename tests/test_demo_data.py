@@ -315,3 +315,19 @@ def test_insert_plan_and_purge_chat_on_real_db() -> None:
         db.execute(text("DELETE FROM users WHERE login_id = 'seedtest-stu'"))
         db.commit()
         db.close()
+
+
+def test_outage_scenario_is_valid_and_within_sla() -> None:
+    from app.services import demo_outage
+
+    plan = demo_outage.outage_plan()
+    assert len(plan) == 8
+    assert sum(1 for s in plan if s.category == "전기") == 5  # 건물 전체 정전
+    assert len({s.detail for s in plan if s.category == "전기"}) == 5  # 호실·층이 모두 다름
+    now = datetime(2026, 11, 1, 3, 0, tzinfo=UTC)
+    for s in plan:
+        assert s.building == "유담관" and s.category in demo_data.DEPT_BY_CATEGORY
+        created = demo_data.created_at_for(s, now)
+        assert created + timedelta(hours=DEFAULT_SLA_HOURS[s.priority]) > now
+    times = sorted(demo_data.created_at_for(s, now) for s in plan if s.category == "전기")
+    assert times[-1] - times[0] <= timedelta(hours=1)

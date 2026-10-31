@@ -33,11 +33,18 @@ def main() -> int:
     parser.add_argument(
         "--purge-chat", action="store_true", help="테스트 채팅(문의 로그 포함) 삭제 — 신고·로그인 계정이 붙은 세션은 남김 (되돌릴 수 없음)"
     )
+    parser.add_argument(
+        "--add-outage-demo",
+        action="store_true",
+        help="건물 전체 정전 시연 신고 8건을 기존 데이터 위에 추가 (아무것도 지우지 않음, 이미 있으면 건너뜀)",
+    )
     parser.add_argument("--attach-user", default="", help="데모 대화 8건을 연결할 학생 계정의 login_id")
     args = parser.parse_args()
     attach_user = args.attach_user.strip()
 
     now = datetime.now(UTC)
+    if args.add_outage_demo:
+        return _add_outage_demo(args.apply, now)
     plan = demo_data.build_plan()
     db = get_sessionmaker()()
     try:
@@ -105,6 +112,32 @@ def main() -> int:
             "\n다음 단계: 탐지·예측 배치를 한 번 실행해야 문제 후보와 재발 예측이 채워져요 "
             "(ai `POST /api/v1/cron/detection-scan`, `prediction-update` 또는 Cloud Scheduler 강제 실행)."
         )
+    return 0
+
+
+def _add_outage_demo(apply: bool, now: datetime) -> int:
+    """건물 전체 정전 시연 신고를 기존 데이터 위에 추가한다 (지우는 것 없음). 추가 뒤에는 탐지 배치를 실행."""
+    from app.services import demo_outage
+
+    specs = demo_outage.outage_plan()
+    db = get_sessionmaker()()
+    try:
+        print(f"## 건물 전체 정전 시연 신고 — {'저장함' if apply else '미리보기 (저장 안 함)'}")
+        if demo_outage.outage_exists(db):
+            print("- 이미 들어 있어서 건너뜀")
+            return 0
+        for s in specs:
+            print(f"- {s.building} {s.floor}층 {s.detail} · {s.category} · {s.priority} · {s.description}")
+        if not apply:
+            return 0
+        counts = demo_data.insert_plan(db, specs, now)
+        db.commit()
+        print(f"\n신고 {counts.reports}건 추가 (진행 중 {counts.open}건). 다음: 탐지 배치(detection-scan) 실행")
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
     return 0
 
 
