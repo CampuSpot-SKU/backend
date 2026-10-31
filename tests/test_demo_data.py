@@ -1,6 +1,6 @@
 """데모 데이터 시나리오 검사 — DB 없이 도는 테스트 (작업 S-2).
 
-시연 화면이 의도대로 나오는지(탐지 후보 2곳, 예측 날짜가 미래, SLA 준수율, 처리 중 신고는 마감 안)를
+시연 화면이 의도대로 나오는지(탐지 후보 5곳, 예측 날짜가 미래, SLA 준수율, 처리 중 신고는 마감 안)를
 계획 데이터만으로 확인한다. 실제 삽입은 임시 DB로 따로 돌려 본다.
 """
 import os
@@ -68,8 +68,8 @@ def test_sla_compliance_is_realistic() -> None:
     assert 0.80 <= met / (met + breached) <= 0.95
 
 
-def test_detection_candidates_are_exactly_the_two_bursts() -> None:
-    """같은 건물+세부위치+카테고리 72시간 안 3건 이상 — 시연용 후보 2곳만."""
+def test_detection_candidates_are_exactly_the_five_bursts() -> None:
+    """같은 건물+세부위치+카테고리 72시간 안 3건 이상 — 시연용 후보 5곳만(그 밖의 중복 접수 쌍은 2건 이하)."""
     groups: dict[tuple[str, str | None, str], list[datetime]] = defaultdict(list)
     for spec in demo_data.build_plan():
         groups[(spec.building, spec.detail, spec.category)].append(_created(spec))
@@ -79,7 +79,13 @@ def test_detection_candidates_are_exactly_the_two_bursts() -> None:
         for i, start in enumerate(times):
             if len([t for t in times[i:] if t - start <= timedelta(hours=72)]) >= 3:
                 bursting.add(key)
-    assert bursting == {("은주1관", "화장실", "시설·설비"), ("한림관", "강의실", "IT·네트워크")}
+    assert bursting == {
+        ("은주1관", "화장실", "시설·설비"),
+        ("혜인관", "강의실", "IT·네트워크"),
+        ("유담관", "주차장", "전기"),
+        ("문예관", "엘리베이터", "시설·설비"),
+        ("상승관", "강의실", "시설·설비"),
+    }
 
 
 def test_predictions_point_to_the_future() -> None:
@@ -88,7 +94,7 @@ def test_predictions_point_to_the_future() -> None:
     for spec in demo_data.build_plan():
         groups[(spec.building, spec.category)].append(_created(spec))
     predicted = {k: sorted(v) for k, v in groups.items() if len(v) >= 3}
-    assert len(predicted) >= 5
+    assert len(predicted) >= 10
     for key, times in predicted.items():
         gaps = [(b - a).total_seconds() / 86400 for a, b in pairwise(times)]
         avg = sum(gaps) / len(gaps)
@@ -98,7 +104,19 @@ def test_predictions_point_to_the_future() -> None:
 
 def test_scale() -> None:
     plan = demo_data.build_plan()
-    assert 50 <= len(plan) <= 80
+    assert 100 <= len(plan) <= 140
+    assert {s.building for s in plan} == set(demo_data.DEMO_BUILDINGS)
+    assert {s.category for s in plan} == set(demo_data.DEPT_BY_CATEGORY)
+    assert {s.priority for s in plan} == {"P1", "P2", "P3", "P4"}
+
+
+def test_duplicate_pairs_exist_but_stay_below_detection() -> None:
+    """같은 날 같은 곳 중복 접수 쌍이 몇 개 있다(2건) — 탐지 후보는 아니다."""
+    groups: dict[tuple[str, str | None, str], list[datetime]] = defaultdict(list)
+    for spec in demo_data.build_plan():
+        groups[(spec.building, spec.detail, spec.category)].append(_created(spec))
+    pairs = [k for k, v in groups.items() if len(v) == 2 and abs(v[0] - v[1]) <= timedelta(days=1)]
+    assert len(pairs) >= 4
 
 
 # ── S-2b: 접수 시각 흩뿌리기 ────────────────────────────────────────────
