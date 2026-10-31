@@ -1,6 +1,6 @@
 """시연용 데모 데이터 시딩·초기화 — Actions "Seed demo data"에서 실행 (작업 S-2).
 
-실행: DATABASE_URL=... python scripts/seed_demo_data.py [--apply] [--reset-only] [--purge-test] [--purge-chat]
+실행: DATABASE_URL=... python scripts/seed_demo_data.py [--apply] [--reset-only] [--purge-test] [--purge-chat] [--attach-user ID]
 - 기본은 미리보기: 무엇이 바뀔지만 출력하고 DB는 그대로 둔다
 - --apply를 붙여야 실제로 저장한다 (한 번의 트랜잭션 — 중간에 실패하면 전부 되돌려짐)
 - --reset-only: 데모 신고만 지운다 (새로 넣지 않음)
@@ -8,6 +8,8 @@
   미리보기에서 지울 접수번호 목록을 보여준다. 다 지워지면 접수번호도 1번부터 다시 시작한다.
 - --purge-chat: 개발·점검 중 쌓인 테스트 채팅(문의 로그 포함)을 지운다 — 데모가 아니고, 신고가 붙어 있지 않고,
   로그인 계정에 연결되지 않은 세션. --purge-test와 같이 쓰면 테스트 신고의 세션도 함께 지워진다. 되돌릴 수 없다.
+- --attach-user ID: 넣은 데모 대화 중 8건을 그 학생 계정(사이트에서 가입한 login_id)에 연결한다 —
+  그 계정으로 로그인하면 이전 대화 사이드바에 신고 대화가 채워진다. 계정을 만들지는 않는다(비밀번호를 코드에 둘 수 없음).
 - 신고마다 대화 세션 1개와 대화 기록(접수 완료 안내·AI 판정 이유 포함)을 같이 넣는다 (S-2b).
 형식·시나리오는 app/services/demo_data.py 참고.
 """
@@ -31,7 +33,9 @@ def main() -> int:
     parser.add_argument(
         "--purge-chat", action="store_true", help="테스트 채팅(문의 로그 포함) 삭제 — 신고·로그인 계정이 붙은 세션은 남김 (되돌릴 수 없음)"
     )
+    parser.add_argument("--attach-user", default="", help="데모 대화 8건을 연결할 학생 계정의 login_id")
     args = parser.parse_args()
+    attach_user = args.attach_user.strip()
 
     now = datetime.now(UTC)
     plan = demo_data.build_plan()
@@ -57,6 +61,9 @@ def main() -> int:
         else:
             print(f"- 테스트 채팅 {chat_sessions}개 세션은 그대로 둠 (지우려면 purge_chat 선택)")
 
+        if attach_user:
+            found = demo_data.find_user(db, attach_user) is not None
+            print(f"- 학생 계정 '{attach_user}': {'있음 — 데모 대화 8건을 연결' if found else '없음 — 사이트에서 먼저 회원가입해야 연결돼요'}")
         if not args.apply:
             if not args.reset_only:
                 _print_plan_summary(plan, now)
@@ -80,6 +87,12 @@ def main() -> int:
                 f"(SLA 준수 {counts.sla_met} / 초과 {counts.sla_breached})"
             )
             print(f"대화 세션 {counts.sessions}개·메시지 {counts.messages}개 입력 (관리자 상세의 '신고 대화'에서 보임)")
+            if attach_user:
+                n = demo_data.attach_demo_to_user(db, attach_user)
+                if n:
+                    print(f"학생 계정 '{attach_user}'에 데모 대화 {n}개 연결 (로그인하면 이전 대화 사이드바에 보임)")
+                else:
+                    print(f"⚠️ 학생 계정 '{attach_user}'를 찾지 못해 연결하지 못했어요 — 회원가입 후 attach_user만 넣고 apply를 다시 실행")
         db.commit()
     except Exception:
         db.rollback()

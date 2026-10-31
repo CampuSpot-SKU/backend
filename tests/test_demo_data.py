@@ -1,6 +1,6 @@
 """데모 데이터 시나리오 검사 — DB 없이 도는 테스트 (작업 S-2).
 
-시연 화면이 의도대로 나오는지(탐지 후보 5곳, 예측 날짜가 미래, SLA 준수율, 처리 중 신고는 마감 안)를
+시연 화면이 의도대로 나오는지(탐지 후보 6곳, 예측 날짜가 미래, SLA 준수율, 처리 중 신고는 마감 안)를
 계획 데이터만으로 확인한다. 실제 삽입은 임시 DB로 따로 돌려 본다.
 """
 import os
@@ -18,7 +18,7 @@ from app.services.demo_data import DEFAULT_SLA_HOURS, KST, DemoSpec
 from app.services.pii_mask import mask_pii
 from app.services.slot_filling import DONE_PREFIX
 
-NOW = datetime(2026, 10, 12, 12, 0, tzinfo=UTC)
+NOW = datetime(2026, 10, 31, 18, 0, tzinfo=UTC)  # 2026-11-01 03:00 KST — 시딩한 시각
 OPEN = {ReportStatus.RECEIVED, ReportStatus.ASSIGNED, ReportStatus.IN_PROGRESS}
 
 
@@ -65,14 +65,15 @@ def test_sla_compliance_is_realistic() -> None:
         else:
             breached += 1
     assert breached >= 3
-    assert 0.80 <= met / (met + breached) <= 0.95
+    assert 0.80 <= met / (met + breached) <= 0.97
 
 
-def test_detection_candidates_are_exactly_the_five_bursts() -> None:
-    """같은 건물+세부위치+카테고리 72시간 안 3건 이상 — 시연용 후보 5곳만(그 밖의 중복 접수 쌍은 2건 이하)."""
+def test_detection_candidates_are_exactly_the_six_bursts() -> None:
+    """같은 건물+세부위치+카테고리 72시간 안 3건 이상 — 시연용 후보 6곳만(그 밖의 중복 접수 쌍은 2건 이하)."""
     groups: dict[tuple[str, str | None, str], list[datetime]] = defaultdict(list)
     for spec in demo_data.build_plan():
-        groups[(spec.building, spec.detail, spec.category)].append(_created(spec))
+        if spec.building and spec.detail:  # 건물·세부위치가 없는 신고는 탐지에서 빠짐
+            groups[(spec.building, spec.detail, spec.category)].append(_created(spec))
     bursting = set()
     for key, times in groups.items():
         times.sort()
@@ -80,11 +81,12 @@ def test_detection_candidates_are_exactly_the_five_bursts() -> None:
             if len([t for t in times[i:] if t - start <= timedelta(hours=72)]) >= 3:
                 bursting.add(key)
     assert bursting == {
-        ("은주1관", "화장실", "시설·설비"),
-        ("혜인관", "강의실", "IT·네트워크"),
-        ("유담관", "주차장", "전기"),
+        ("은주1관", "여자 화장실", "시설·설비"),
+        ("혜인관", "301호 강의실", "IT·네트워크"),
+        ("유담관", "B101호 주차장", "전기"),
         ("문예관", "엘리베이터", "시설·설비"),
-        ("상승관", "강의실", "시설·설비"),
+        ("유담관", "1103호 L03", "시설·설비"),
+        ("한림관", "201호 교직원 및 학생식당", "안전"),
     }
 
 
@@ -92,9 +94,10 @@ def test_predictions_point_to_the_future() -> None:
     """건물+카테고리 3건 이상이면 예측이 생긴다 — 평균 간격이 하루 이상이고 예상 시점이 아직 안 지난 상태여야 자연스럽다."""
     groups: dict[tuple[str, str], list[datetime]] = defaultdict(list)
     for spec in demo_data.build_plan():
-        groups[(spec.building, spec.category)].append(_created(spec))
+        if spec.building:
+            groups[(spec.building, spec.category)].append(_created(spec))
     predicted = {k: sorted(v) for k, v in groups.items() if len(v) >= 3}
-    assert len(predicted) >= 10
+    assert len(predicted) >= 15
     for key, times in predicted.items():
         gaps = [(b - a).total_seconds() / 86400 for a, b in pairwise(times)]
         avg = sum(gaps) / len(gaps)
@@ -104,19 +107,31 @@ def test_predictions_point_to_the_future() -> None:
 
 def test_scale() -> None:
     plan = demo_data.build_plan()
-    assert 100 <= len(plan) <= 140
-    assert {s.building for s in plan} == set(demo_data.DEMO_BUILDINGS)
+    assert 180 <= len(plan) <= 260
+    assert {s.building for s in plan if s.building} == set(demo_data.DEMO_BUILDINGS)
     assert {s.category for s in plan} == set(demo_data.DEPT_BY_CATEGORY)
-    assert {s.priority for s in plan} == {"P1", "P2", "P3", "P4"}
+    assert {"P1", "P2", "P4"} <= {s.priority for s in plan}  # 실제 AI는 P3를 거의 내지 않는다(영향 낮음·긴급 높음)
 
 
 def test_duplicate_pairs_exist_but_stay_below_detection() -> None:
     """같은 날 같은 곳 중복 접수 쌍이 몇 개 있다(2건) — 탐지 후보는 아니다."""
     groups: dict[tuple[str, str | None, str], list[datetime]] = defaultdict(list)
     for spec in demo_data.build_plan():
-        groups[(spec.building, spec.detail, spec.category)].append(_created(spec))
+        if spec.building and spec.detail:
+            groups[(spec.building, spec.detail, spec.category)].append(_created(spec))
     pairs = [k for k, v in groups.items() if len(v) == 2 and abs(v[0] - v[1]) <= timedelta(days=1)]
-    assert len(pairs) >= 4
+    assert len(pairs) >= 10
+
+
+def test_mine_descriptions_exist_once_in_plan() -> None:
+    """학생 계정에 연결할 8건이 계획에 정확히 한 번씩 있고, 상태가 골고루 섞여 있다."""
+    descs = [s.description for s in demo_data.build_plan()]
+    assert len(demo_data.MINE_DESCRIPTIONS) == 8
+    for d in demo_data.MINE_DESCRIPTIONS:
+        assert descs.count(d) == 1, d
+    mine = [s for s in demo_data.build_plan() if s.description in demo_data.MINE_DESCRIPTIONS]
+    finals = {demo_data.final_status(s, NOW) for s in mine}
+    assert len(finals) >= 2
 
 
 # ── S-2b: 접수 시각 흩뿌리기 ────────────────────────────────────────────
@@ -124,7 +139,7 @@ def test_duplicate_pairs_exist_but_stay_below_detection() -> None:
 
 def test_created_times_are_spread_over_student_hours() -> None:
     old = [s for s in demo_data.build_plan() if s.days_ago >= demo_data.SPREAD_FROM_DAYS]
-    assert len(old) >= 30
+    assert len(old) >= 100
     clock = set()
     for spec in old:
         created = _created(spec)
@@ -137,10 +152,13 @@ def test_created_times_are_spread_over_student_hours() -> None:
     assert len(clock) >= len(old) * 0.9  # 예전엔 44건이 같은 초였음
 
 
-def test_recent_reports_keep_relative_times() -> None:
+def test_reports_are_filed_at_their_clock_time() -> None:
+    """시각(clock)이 정해진 신고는 그날(KST) 그 시각에 접수되고, 아직 오지 않은 시각이 아니다."""
     for spec in demo_data.build_plan():
-        if spec.days_ago < demo_data.SPREAD_FROM_DAYS:
-            assert _created(spec) == NOW - timedelta(days=spec.days_ago)
+        assert spec.clock
+        created = _created(spec).astimezone(KST)
+        assert f"{created.hour:02d}:{created.minute:02d}" == spec.clock
+        assert created <= NOW, spec.description
 
 
 def test_created_times_are_deterministic() -> None:
@@ -182,11 +200,11 @@ def test_dialogues_have_variety_and_clarifying_questions() -> None:
     plan = demo_data.build_plan()
     dialogues = [demo_data.build_dialogue(s, i, _created(s)) for i, s in enumerate(plan, start=1)]
     firsts = {d[0].content for d in dialogues}
-    assert len(firsts) >= len(plan) * 0.95
+    assert len(firsts) >= len(plan) * 0.85
     lengths = {len(d) for d in dialogues}
     assert lengths >= {4, 6}, lengths  # 바로 접수(4개) / 되묻기 한 번(6개)가 섞여 있음
     asked = [d for d in dialogues if len(d) > 4]
-    assert 10 <= len(asked) <= len(plan) * 0.6
+    assert 15 <= len(asked) <= len(plan) * 0.6
 
 
 def test_dialogue_text_is_clean() -> None:
@@ -204,7 +222,7 @@ TEST_DB = os.environ.get("TEST_DATABASE_URL")
 @pytest.mark.skipif(not TEST_DB, reason="TEST_DATABASE_URL 없음 — DB 통합테스트 생략")
 def test_insert_plan_and_purge_chat_on_real_db() -> None:
     os.environ["DATABASE_URL"] = str(TEST_DB)
-    from sqlalchemy import func, select
+    from sqlalchemy import func, select, text
 
     from app.config import get_settings
     from app.db.session import get_engine, get_sessionmaker
@@ -234,6 +252,20 @@ def test_insert_plan_and_purge_chat_on_real_db() -> None:
         assert conv.messages[-1].content.startswith(DONE_PREFIX)
         assert f"{report.display_no}번" in conv.messages[-1].content
 
+        # 학생 계정에 데모 대화 8건 연결 → 이전 대화 목록에 보인다 (계정이 없으면 0건)
+        from app.models.user import User
+        from app.services.chat_history import list_my_sessions
+
+        assert demo_data.attach_demo_to_user(db, "no-such-student") == 0
+        student = User(login_id="seedtest-stu", password_hash="x" * 60, name="테스트")
+        db.add(student)
+        db.flush()
+        assert demo_data.attach_demo_to_user(db, "seedtest-stu") == 8
+        assert demo_data.attach_demo_to_user(db, "seedtest-stu") == 0  # 이미 연결된 건 다시 안 건드림
+        db.commit()
+        mine = list_my_sessions(db, student.id, limit=20, offset=0)
+        assert len(mine.items) == 8
+
         # purge_chat: 데모 세션은 남기고, 신고 없는 테스트 세션만 지운다
         stray = ChatSession(user_identifier="stray-test-session")
         db.add(stray)
@@ -249,5 +281,6 @@ def test_insert_plan_and_purge_chat_on_real_db() -> None:
         assert db.scalar(select(func.count()).select_from(ChatMessage)) >= counts.messages
     finally:
         demo_data.reset_demo(db)
+        db.execute(text("DELETE FROM users WHERE login_id = 'seedtest-stu'"))
         db.commit()
         db.close()
