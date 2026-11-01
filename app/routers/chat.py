@@ -601,7 +601,7 @@ def _create_from_agent(
     judged_text = "\n".join([state.problem, *user_texts]) if state.problem else "\n".join(user_texts)
     slots = judge(slots, judged_text)
     extra = ""
-    pending = [p for p in state.pending_issues if p][:3]
+    pending = ra.clean_pending_issues(state.pending_issues, state.problem, user_texts, state.photo_note)[:3]
     if pending:
         names = ", ".join(f"'{p}'" for p in pending)
         extra = f" 말씀하신 {names} 건도 따로 접수하시려면 아래 버튼을 눌러 주세요."

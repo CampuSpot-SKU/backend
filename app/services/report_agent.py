@@ -289,6 +289,44 @@ def slots_from_state(state: AgentState, buildings: Sequence[BuildingRef]) -> Rep
     return replace(slots, impact=_impact(f"{state.problem} {state.place}", slots.building, slots.detail))
 
 
+_PENDING_BAD_CHARS = set('"{}[]\\<>')
+_PENDING_PHOTO_WORDS = ("사진", "모습이", "보입니다", "보여요", "photo_", "temp_", "p0_")
+
+
+def _bigrams(text: str) -> set[str]:
+    t = re.sub(r"[\s.,!?'\"()\[\]{}·~\-_]+", "", text)
+    return {t[i : i + 2] for i in range(len(t) - 1)} if len(t) > 1 else {t}
+
+
+def clean_pending_issues(
+    pending: Sequence[str], problem: str, user_texts: Sequence[str], photo_note: str = ""
+) -> list[str]:
+    """접수 뒤 "따로 접수할 별건"으로 안내할 목록에서 진짜 별건만 남긴다.
+
+    사진을 받은 턴에 AI가 사진 설명이나 방금 접수한 문제를 별건처럼 적거나, 내부 키·JSON 조각이 섞여 나올 때가 있어
+    (시연 접수 중 확인) 그런 항목은 버린다: JSON 기호·사진 설명 말투·영문 키 모양·방금 접수한 내용과 비슷한 문장.
+    """
+    refs = [problem, photo_note, *user_texts]
+    ref_sets = [_bigrams(r) for r in refs if r and r.strip()]
+    kept: list[str] = []
+    for raw in pending:
+        item = raw.strip()
+        if not item or len(item) > 60 or len(item) < 2:
+            continue
+        if any(ch in _PENDING_BAD_CHARS for ch in item) or any(w in item for w in _PENDING_PHOTO_WORDS):
+            continue
+        if re.fullmatch(r"[A-Za-z0-9_\-]{12,}", item):
+            continue
+        grams = _bigrams(item)
+        if grams and any(
+            len(grams & rs) / len(grams | rs) >= 0.45 or len(grams & rs) / len(grams) >= 0.7 for rs in ref_sets if rs
+        ):
+            continue
+        if item not in kept:
+            kept.append(item)
+    return kept
+
+
 def description_for(user_texts: Sequence[str], state: AgentState) -> str:
     """접수 상황(description): 학생이 한 말 + 담당자가 알아야 할 확인 사항."""
     body = state.problem or " ".join(user_texts)

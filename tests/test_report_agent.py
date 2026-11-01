@@ -172,3 +172,30 @@ def test_photo_conflict_question_is_not_counted_and_photo_mark_is_kept_out_of_te
     assert tail.state is not None and tail.state.photo_note == "벽이 크게 부서져 있어요"
     assert ra.without_photo_mark("물이 새요 (사진 첨부)") == "물이 새요" and ra.with_photo_mark("물이 새요") == "물이 새요 (사진 첨부)"
     assert ra.with_photo_mark(ra.PHOTO_ONLY_TEXT) == ra.PHOTO_ONLY_TEXT
+
+
+def test_clean_pending_issues_drops_photo_echo_and_internal_keys() -> None:
+    from app.services.report_agent import clean_pending_issues
+
+    problem = "계단에 물이 흥건해요"
+    texts = ["계단에 물이 흥건해요", "수인관 1층 계단이에요"]
+    note = "계단 바닥에 물이 흥건하게 고여 있는 모습이에요."
+    bad = [
+        "],",
+        'photo_note":"계단 바닥에 물이 고여 있어요","photo_conflict":false}',
+        "p0_0_1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_temp_interna",
+        "복도 창문이 깨져 있어요 (사진 첨부)입니다.",
+        "계단에 물이 흥건해요",
+        "쓰레기통에 쓰레기가 가득 차서 주변 바닥까지 넘쳐 있어요 사진에 보입니다",
+        "",
+    ]
+    assert clean_pending_issues(bad, problem, texts, note) == []
+
+
+def test_clean_pending_issues_keeps_a_real_separate_issue() -> None:
+    from app.services.report_agent import clean_pending_issues
+
+    out = clean_pending_issues(
+        ["화장실 변기가 막혔어요", "정수기 고장", "정수기 고장"], "정수기가 고장났어요 2층", ["정수기가 고장났어요"], ""
+    )
+    assert out == ["화장실 변기가 막혔어요"]
